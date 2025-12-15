@@ -494,7 +494,7 @@ def process_thor_bands(
 
         try:
             # Handle SAR bands with GSD suffixes
-            if (gsd_str := band.split("_")[-1]).isdigit():
+            if (gsd_str := band.split("_")[-1]).isdigit() and "S1" in band:
                 band = "_".join(band.split("_")[:-1])
                 thor_band = lookup_band[band]
                 logger.info(

@@ -11,7 +11,8 @@ except (ImportError, ModuleNotFoundError) as e:
     )
     raise ImportError(error_msg)
 
-from .datasets import utils  # noqa: E402
+from .datamodules import MireMapNonGeoDataModule  # noqa: E402
+from .datasets import MireMapDataset, utils  # noqa: E402
 from .models import thor_vit  # noqa: E402
 
-__all__ = ["utils", "thor_vit"]
+__all__ = ["utils", "thor_vit", "MireMapDataset", "MireMapNonGeoDataModule"]

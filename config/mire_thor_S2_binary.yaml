@@ -1,0 +1,158 @@
+seed_everything: 0
+custom_modules_path: ./thor_terratorch_ext # Path relative to where you run terratorch
+trainer:
+  accelerator: gpu
+  strategy: auto
+  devices: auto
+  num_nodes: 1
+  precision: 16-mixed
+  # logger:
+  #   class_path: TensorBoardLogger
+  #   init_args:
+  #     save_dir: ./tensorboard_logs
+  #     name: mire_thor_S2_binary
+  logger:
+    class_path: WandbLogger
+    init_args:
+      name: mire_thor_S2_binary
+      project: terratorch
+      save_dir: /nr/bamjo/projects/fm4cs/usr/tforgaard/terratorch_results
+  callbacks:
+    - class_path: RichProgressBar
+    - class_path: LearningRateMonitor
+      init_args:
+        logging_interval: epoch
+    - class_path: EarlyStopping
+      init_args:
+        monitor: val/loss
+        patience: 20
+        mode: min
+        check_finite: false
+        verbose: true
+
+  max_epochs: 200
+  check_val_every_n_epoch: 1
+  accumulate_grad_batches: 1
+  log_every_n_steps: 1
+  enable_checkpointing: true
+  default_root_dir: /nr/bamjo/projects/fm4cs/usr/tforgaard/terratorch_results/results
+data:
+  class_path: thor_terratorch_ext.datamodules.mire_map_module.MireMapNonGeoDataModule
+  init_args:
+    batch_size: 4
+    num_workers: 2
+    bands:
+      # - COASTAL_AEROSOL
+      - BLUE
+      - GREEN
+      - RED
+      - RED_EDGE_1
+      - RED_EDGE_2
+      - RED_EDGE_3
+      - NIR_BROAD
+      - NIR_NARROW
+      # - WATER_VAPOR
+      # - CIRRUS
+      - SWIR_1
+      - SWIR_2
+    data_root: /nr/bamjo/jodata6/pro/know_earth/data/nibio_mire_data/crops_1024_v2
+    mode: binary
+    no_label_replace: 255
+    no_data_replace: 0 # "median"
+    means:
+    - 0.1507
+    - 0.1568
+    - 0.1464
+    - 0.2466
+    - 0.1815
+    - 0.2292
+    - 0.2385
+    - 0.2467
+    - 0.1326
+    - 0.0857
+    stds:
+    - 0.2529
+    - 0.2545
+    - 0.2592
+    - 0.2205
+    - 0.2493
+    - 0.2304
+    - 0.2184
+    - 0.2082
+    - 0.1178
+    - 0.0917
+    train_transform:
+      - class_path: albumentations.CropNonEmptyMaskIfExists
+        init_args:
+          height: 288
+          width: 288
+          p: 1.0
+          ignore_values: [255]
+      - class_path: ToTensorV2
+
+model:
+  class_path: terratorch.tasks.SemanticSegmentationTask
+  init_args:
+    plot_on_val: 1
+    tiled_inference_on_testing: true
+    tiled_inference_on_validation: true
+    model_args:
+      backbone_pretrained: true
+      backbone: terratorch_thor_vit_base_encoder_alibi_patch_size_embed_v1
+      backbone_ckpt: /nr/bamjo/projects/fm4cs/usr/tforgaard/fm4cs_results/thor/thor_v1_vit_base.pt
+      backbone_model_ckpt_type: encoder
+      backbone_return_channel_params: true
+      backbone_input_params:
+        ground_covers: [2880]
+        flexivit_patch_size_seqs: 
+          - 8
+      backbone_out_indices: [-1]
+      backbone_model_bands:
+        # - COASTAL_AEROSOL
+        - BLUE
+        - GREEN
+        - RED
+        - RED_EDGE_1
+        - RED_EDGE_2
+        - RED_EDGE_3
+        - NIR_BROAD
+        - NIR_NARROW
+        # - WATER_VAPOR
+        # - CIRRUS # Not present in THOR
+        - SWIR_1
+        - SWIR_2
+      decoder: FCNDecoder
+      decoder_channels: 256
+      decoder_num_convs: 4
+      num_classes: 2
+      head_dropout: 0.1
+      head_channel_list:
+        - 256
+      necks:
+        - name: THORGroupReshapeTokensToImage
+    loss: 
+      - dice
+      - ce
+    ignore_index: 255
+    class_weights: # TODO: Adjust weights
+      - 0.5
+      - 0.5
+    freeze_backbone: true
+    freeze_decoder: false
+    model_factory: EncoderDecoderFactory
+    tiled_inference_parameters:
+      h_crop: 288
+      h_stride: 256
+      w_crop: 288
+      w_stride: 256
+      average_patches: true
+      batch_size: 4
+optimizer:
+  class_path: torch.optim.AdamW
+  init_args:
+    lr: 6e-5
+    weight_decay: 0.05
+lr_scheduler:
+  class_path: ReduceLROnPlateau
+  init_args:
+    monitor: val/loss
