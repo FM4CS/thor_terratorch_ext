@@ -1,0 +1,28 @@
+[project]
+name = "thor-terratorch-ext"
+version = "0.1.0"
+description = "THOR extension for TerraTorch"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "terratorch>=1.1.1",
+    "thor @ git+ssh://git@github.com/FM4CS/thor@main", # TODO: switch to https when repo is public 
+]
+
+
+[build-system]
+requires = ["setuptools"]
+build-backend = 'setuptools.build_meta'
+
+
+[tool.setuptools.packages.find]
+include = ["thor_terratorch_ext*"]
+
+[dependency-groups]
+dev = [
+    "ipython>=8.37.0",
+    "ruff>=0.14.8",
+]
+log = [
+    "wandb>=0.19.11",
+]
