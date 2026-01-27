@@ -166,7 +166,7 @@ model:
         - IW_VH
       backbone_merge_features: concat
       backbone_rescale_features: null
-      backbone_backbones:
+      backbone_encoders:
         - terratorch_thor_vit_base_encoder_alibi_patch_size_embed_v1:
             freeze_backbone: true
             backbone_pretrained: true

@@ -166,7 +166,7 @@ model:
         - VH
       backbone_merge_features: flatten
       backbone_rescale_features: null
-      backbone_backbones:
+      backbone_encoders:
         - vit_small_patch16_224.dino:
             out_indices: [-1]
             backbone_dynamic_img_size: true

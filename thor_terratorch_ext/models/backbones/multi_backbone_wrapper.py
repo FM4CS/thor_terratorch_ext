@@ -12,8 +12,8 @@ import torch
 import torch.nn.functional as F  # noqa: N812
 from terratorch.datasets import HLSBands, OpticalBands, SARBands
 from terratorch.models.utils import _get_backbone, extract_prefix_keys
-
 from torch import nn
+
 
 try:
     from thor_terratorch_ext.datasets.utils import OLCIBands, SARThorBands, SLSTRBands
@@ -25,9 +25,8 @@ except Exception:  # pragma: no cover - optional bands
 import logging
 
 from terratorch.models.necks import Neck, build_neck_list
-from terratorch.registry import (
-    TERRATORCH_BACKBONE_REGISTRY,
-)
+from terratorch.registry import TERRATORCH_BACKBONE_REGISTRY
+
 
 logger = logging.getLogger(__name__)
 
@@ -53,11 +52,11 @@ def freeze_module(module: nn.Module):
 
 @TERRATORCH_BACKBONE_REGISTRY.register
 class MultiBackboneWrapper(nn.Module):
-    """Backbone that combines multiple backbones into a single feature pyramid."""
+    """Backbone that combines multiple encoders into a single feature pyramid."""
 
     def __init__(
         self,
-        backbones: list[dict],
+        encoders: list[dict],
         bands: list[
             HLSBands
             | OpticalBands
@@ -79,14 +78,14 @@ class MultiBackboneWrapper(nn.Module):
     ) -> None:
         super().__init__()
 
-        if hasattr(backbones, "items"):
+        if hasattr(encoders, "items"):
             raise TypeError(
-                "`backbones` must be a list/sequence of backbone configuration dictionaries."
+                "`encoders` must be a list/sequence of encoder configuration dictionaries."
             )
 
-        backbone_entries = list(backbones)
-        if not backbone_entries:
-            raise ValueError("At least one backbone configuration must be provided.")
+        encoder_entries = list(encoders)
+        if not encoder_entries:
+            raise ValueError("At least one encoder configuration must be provided.")
 
         bands = _flatten_bands(bands)
 
@@ -100,7 +99,7 @@ class MultiBackboneWrapper(nn.Module):
         backbone_necks: list[Neck | None] = []
         backbone_bands: list[list[int]] = []
 
-        for entry in backbone_entries:
+        for entry in encoder_entries:
             logger.debug("=== Building backbone ===")
             if hasattr(entry, "items") or isinstance(entry, dict):
                 if len(entry) == 1:
