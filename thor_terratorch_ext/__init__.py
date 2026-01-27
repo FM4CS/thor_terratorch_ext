@@ -13,6 +13,12 @@ except (ImportError, ModuleNotFoundError) as e:
 
 from .datamodules import MireMapNonGeoDataModule  # noqa: E402
 from .datasets import MireMapDataset, utils  # noqa: E402
-from .models import thor_vit  # noqa: E402
+from .models.backbones import thor_vit, multi_backbone_wrapper  # noqa: E402
 
-__all__ = ["utils", "thor_vit", "MireMapDataset", "MireMapNonGeoDataModule"]
+__all__ = [
+    "utils",
+    "thor_vit",
+    "multi_backbone_wrapper",
+    "MireMapDataset",
+    "MireMapNonGeoDataModule",
+]

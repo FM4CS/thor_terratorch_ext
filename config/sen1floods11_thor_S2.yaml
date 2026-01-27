@@ -120,7 +120,7 @@ model:
       backbone_return_channel_params: true
       backbone_input_params:
         ground_covers: [2880]
-        flexivit_patch_size_seqs: 
+        flexivit_patch_size_seqs:
           - 8
       backbone_out_indices: [-1]
       backbone_model_bands:
