@@ -139,7 +139,7 @@ data:
           height: 288
           width: 288
       - class_path: albumentations.D4
-      - class_path: ToTensorV2
+      - class_path: albumentations.pytorch.transforms.ToTensorV2
 
 model:
   class_path: terratorch.tasks.SemanticSegmentationTask

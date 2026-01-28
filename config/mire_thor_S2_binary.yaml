@@ -88,7 +88,7 @@ data:
           width: 288
           p: 1.0
           ignore_values: [255]
-      - class_path: ToTensorV2
+      - class_path: albumentations.pytorch.transforms.ToTensorV2
 
 model:
   class_path: terratorch.tasks.SemanticSegmentationTask

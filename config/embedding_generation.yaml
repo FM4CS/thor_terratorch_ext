@@ -1,37 +1,14 @@
-seed_everything: 0
+# lightning.pytorch==2.1.1
 custom_modules_path: ./thor_terratorch_ext # Path relative to where you run terratorch
+seed_everything: 0
 trainer:
-  accelerator: gpu
+  accelerator: auto
   strategy: auto
   devices: auto
   num_nodes: 1
-  precision: 16-mixed
-  # logger: True # will use tensorboardlogger
-  logger:
-    class_path: WandbLogger
-    init_args:
-      name: sen1floods11_thor_S2_2880m
-      project: terratorch
-      save_dir: /nr/bamjo/projects/fm4cs/usr/tforgaard/terratorch_results
-  callbacks:
-    - class_path: RichProgressBar
-    - class_path: LearningRateMonitor
-      init_args:
-        logging_interval: epoch
-    - class_path: EarlyStopping
-      init_args:
-        monitor: val/loss
-        patience: 20
-        mode: min
-        check_finite: false
-        verbose: true
+  callbacks: []
+  max_epochs: 0
 
-  max_epochs: 200
-  check_val_every_n_epoch: 1
-  accumulate_grad_batches: 1
-  log_every_n_steps: 1
-  enable_checkpointing: true
-  default_root_dir: /nr/bamjo/projects/fm4cs/usr/tforgaard/terratorch_results/results
 data:
   class_path: GenericNonGeoSegmentationDataModule
   init_args:
@@ -58,6 +35,8 @@ data:
     val_label_data_root: /nr/bamjo/projects/fm4cs/data/sen1floods/v1.1/data/flood_events/HandLabeled/LabelHand
     test_data_root: /nr/bamjo/projects/fm4cs/data/sen1floods/v1.1/data/flood_events/HandLabeled/S2Hand/
     test_label_data_root: /nr/bamjo/projects/fm4cs/data/sen1floods/v1.1/data/flood_events/HandLabeled/LabelHand
+    predict_data_root: /nr/bamjo/projects/fm4cs/data/sen1floods/v1.1/data/flood_events/HandLabeled/S2Hand/
+    # predict_label_data_root: /nr/bamjo/projects/fm4cs/data/sen1floods/v1.1/data/flood_events/HandLabeled/LabelHand
     # these must be obtained by running terratorch/examples/scripts/convert_sen1floods11_splits.py on the original split csv files
     train_split: /nr/bamjo/projects/fm4cs/data/sen1floods/v1.1/splits/flood_handlabeled/flood_train_data.txt
     test_split: /nr/bamjo/projects/fm4cs/data/sen1floods/v1.1/splits/flood_handlabeled/flood_test_data.txt
@@ -99,31 +78,24 @@ data:
     num_classes: 2
 
     # Transforms are shared between all image modalities (e.g. same crop area)
-    train_transform:
-      - class_path: albumentations.RandomCrop
-        init_args:
-          height: 288
-          width: 288
-      - class_path: albumentations.D4
-      - class_path: albumentations.pytorch.transforms.ToTensorV2
+    # train_transform:
+    #   - class_path: albumentations.RandomCrop
+    #     init_args:
+    #       height: 288
+    #       width: 288
+    #   - class_path: albumentations.D4
+    #   - class_path: albumentations.pytorch.transforms.ToTensorV2
+
+predict_output_dir: './'
 
 model:
-  class_path: terratorch.tasks.SemanticSegmentationTask
+  class_path: terratorch.tasks.EmbeddingGenerationTask
   init_args:
-    tiled_inference_on_testing: true
-    tiled_inference_on_validation: true
+    model: terratorch_thor_vit_base_encoder_alibi_patch_size_embed_v1
     model_args:
-      backbone_pretrained: true
-      backbone: terratorch_thor_vit_base_encoder_alibi_patch_size_embed_v1
-      backbone_ckpt: /nr/bamjo/projects/fm4cs/usr/tforgaard/fm4cs_results/thor/thor_v1_vit_base.pt
-      backbone_model_ckpt_type: encoder
-      backbone_return_channel_params: true
-      backbone_input_params:
-        ground_covers: [2880]
-        flexivit_patch_size_seqs:
-          - 8
-      backbone_out_indices: [-1]
-      backbone_model_bands:
+      pretrained: true
+      ckpt: /nr/bamjo/projects/fm4cs/usr/tforgaard/fm4cs_results/thor/thor_v1_vit_base.pt
+      model_bands:
         # - COASTAL_AEROSOL
         - BLUE
         - GREEN
@@ -137,36 +109,15 @@ model:
         # - CIRRUS # Not present in THOR
         - SWIR_1
         - SWIR_2
-      decoder: FCNDecoder
-      decoder_channels: 256
-      decoder_num_convs: 4
-      num_classes: 2
-      head_dropout: 0.1
-      head_channel_list:
-        - 256
-      necks:
-        - name: THORGroupReshapeTokensToImage
-    loss: ce
-    ignore_index: -1
-    class_weights:
-      - 0.3
-      - 0.7
-    freeze_backbone: true
-    freeze_decoder: false
-    model_factory: EncoderDecoderFactory
-    tiled_inference_parameters:
-      h_crop: 288
-      h_stride: 256
-      w_crop: 288
-      w_stride: 256
-      average_patches: true
-      batch_size: 4
-optimizer:
-  class_path: torch.optim.AdamW
-  init_args:
-    lr: 6e-5
-    weight_decay: 0.05
-lr_scheduler:
-  class_path: ReduceLROnPlateau
-  init_args:
-    monitor: val/loss
+      model_ckpt_type: encoder
+      return_channel_params: true
+      input_params:
+        ground_covers: [2880]
+        flexivit_patch_size_seqs: 
+          - 16
+      out_indices: [-1]
+    output_format: tiff
+    output_dir: 'output/thor_embeddings'
+    layers: [-1] # Model layers to extract embeddings from, -1 means the last layer
+    embedding_pooling: null
+    has_cls: False

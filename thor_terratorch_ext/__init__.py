@@ -14,6 +14,7 @@ except (ImportError, ModuleNotFoundError) as e:
 from .datamodules import MireMapNonGeoDataModule  # noqa: E402
 from .datasets import MireMapDataset, utils  # noqa: E402
 from .models.backbones import thor_vit, multi_backbone_wrapper  # noqa: E402
+from .models.monkey_patch_embedding_generation import *  # noqa: E402,F401, F403
 
 __all__ = [
     "utils",
