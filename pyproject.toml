@@ -5,7 +5,7 @@ description = "THOR extension for TerraTorch"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "terratorch>=1.1.1",
+    "terratorch>=1.2.1",
     "thor @ git+ssh://git@github.com/FM4CS/thor@main", # TODO: switch to https when repo is public 
 ]
 
