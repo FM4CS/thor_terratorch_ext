@@ -8,6 +8,7 @@ from typing import Any, Iterable, Literal
 import torch
 import torch.nn.functional as F  # noqa: N812
 import yaml
+from huggingface_hub import hf_hub_download
 from terratorch.datasets import HLSBands, OpticalBands, SARBands
 from terratorch.models.necks import Neck
 from terratorch.registry import TERRATORCH_BACKBONE_REGISTRY, TERRATORCH_NECK_REGISTRY
@@ -471,6 +472,33 @@ AVAILABLE_GROUPS = {
 ###################################################################################
 
 
+name_mapping = {
+    "thor_vit_base_encoder_alibi_patch_size_embed_v1": "thor_v1_base",
+    "thor_vit_small_encoder_alibi_patch_size_embed_v1": "thor_v1_small",
+    "thor_vit_tiny_encoder_alibi_patch_size_embed_v1": "thor_v1_tiny",
+    "thor_vit_large_encoder_alibi_patch_size_embed_v1": "thor_v1_large",
+}
+
+pretrained_weights = {
+    "thor_v1_tiny": {
+        "hf_hub_id": "FM4CS/THOR-1.0-tiny",
+        "hf_hub_filename": "thor_v1_vit_tiny.pt",
+    },
+    "thor_v1_small": {
+        "hf_hub_id": "FM4CS/THOR-1.0-small",
+        "hf_hub_filename": "thor_v1_vit_small.pt",
+    },
+    "thor_v1_base": {
+        "hf_hub_id": "FM4CS/THOR-1.0-base",
+        "hf_hub_filename": "thor_v1_vit_base.pt",
+    },
+    "thor_v1_large": {
+        "hf_hub_id": "FM4CS/THOR-1.0-large",
+        "hf_hub_filename": "thor_v1_vit_large.pt",
+    },
+}
+
+
 def process_thor_bands(
     bands: list[
         HLSBands | OpticalBands | SARBands | SARThorBands | OLCIBands | SLSTRBands
@@ -768,6 +796,13 @@ def load_thor_model(
     pretrained: bool = False,
     **kwargs,
 ):
+    # If short name provided, map to full model name
+    if model_name in name_mapping.values():
+        model_name = next(
+            key for key, value in name_mapping.items() if value == model_name
+        )
+        logger.info(f"Mapped model name to full THOR model name: {model_name}")
+
     # Map to THOR bands names and get updated channel params if necessary
     bands, channel_params_updated = process_thor_bands(model_bands)
     logger.info(f"bands mapped to thor: {bands}")
@@ -799,7 +834,7 @@ def load_thor_model(
         ],  # regex ignore list, removing mae head
         "input_params": default_input_params,
     }
-    model_checkpoint_key = kwargs.pop("model_ckpt_type", "mae")
+    model_checkpoint_key = kwargs.pop("model_ckpt_type", "encoder")
 
     if config is not None:
         if "models" in config:
@@ -843,8 +878,19 @@ def load_thor_model(
             model_config["input_params"][k] = v
 
     if pretrained and model_config["ckpt"] is None:
-        msg = f"Pretrained is set to True, but no checkpoint was provided for model {model_checkpoint_key}. Please provide a checkpoint path."
-        raise ValueError(msg)
+        logger.info(f"Using pretrained weights for model {model_checkpoint_key}")
+        # from huggingface_hub import login
+        # login()
+        variant = name_mapping[model_name]
+        state_dict_file = hf_hub_download(
+            repo_id=pretrained_weights[variant]["hf_hub_id"],
+            filename=pretrained_weights[variant]["hf_hub_filename"],
+        )
+        model_config["ckpt"] = state_dict_file
+    elif pretrained and model_config["ckpt"] is not None:
+        logger.info(
+            f"Using locally provided checkpoint for model {model_checkpoint_key}."
+        )
 
     logger.info(f"Instantiating model {model_checkpoint_key} of type {model_name}")
     model = MODELS.build(model_cfgs={model_checkpoint_key: model_config})[
@@ -875,6 +921,13 @@ def register_thor_models():
             TERRATORCH_BACKBONE_REGISTRY.register(
                 _partial_with_name(load_thor_model, model_name=model_name)
             )
+            # Also register under mapped name
+            mapped_name = name_mapping.get(model_name, None)
+            if mapped_name is not None:
+                logger.debug(f"-> also registering {mapped_name} as THOR ViT model")
+                TERRATORCH_BACKBONE_REGISTRY.register(
+                    _partial_with_name(load_thor_model, model_name=mapped_name),
+                )
     register_thor_models._done = True
 
 
