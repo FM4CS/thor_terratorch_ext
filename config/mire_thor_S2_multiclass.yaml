@@ -99,10 +99,7 @@ model:
     tiled_inference_on_validation: true
     model_args:
       backbone_pretrained: true
-      backbone: terratorch_thor_vit_base_encoder_alibi_patch_size_embed_v1
-      backbone_ckpt: /nr/bamjo/projects/fm4cs/usr/tforgaard/fm4cs_results/thor/thor_v1_vit_base.pt
-      backbone_model_ckpt_type: encoder
-      backbone_return_channel_params: true
+      backbone: thor_v1_base
       backbone_input_params:
         ground_covers: [2880]
         flexivit_patch_size_seqs: 
