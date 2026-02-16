@@ -1,0 +1,134 @@
+seed_everything: 0
+custom_modules_path: ./thor_terratorch_ext # Path relative to where you run terratorch
+trainer:
+  accelerator: gpu
+  strategy: auto
+  devices: [3]
+  num_nodes: 1
+  precision: 16-mixed
+  # logger:
+  #   class_path: TensorBoardLogger
+  #   init_args:
+  #     save_dir: ./tensorboard_logs
+  #     name: iceberg_thor_S1
+  logger:
+    class_path: WandbLogger
+    init_args:
+      name: iceberg_thor_S1
+      project: terratorch
+      save_dir: /nr/bamjo/projects/fm4cs/usr/tforgaard/terratorch_results
+  callbacks:
+    - class_path: RichProgressBar
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+      init_args:
+        logging_interval: epoch
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: val_map
+        patience: 20
+        mode: max
+        check_finite: false
+        verbose: true
+    - class_path: ModelCheckpoint
+      init_args:
+        monitor: val_map
+        mode: max
+        save_top_k: 1
+        filename: "best-{epoch}-{val_map:.4f}"
+        verbose: true
+
+  max_epochs: 200
+  check_val_every_n_epoch: 1
+  accumulate_grad_batches: 1
+  log_every_n_steps: 1
+  enable_checkpointing: true
+  default_root_dir: /nr/bamjo/projects/fm4cs/usr/tforgaard/terratorch_results/results
+data:
+  class_path: thor_terratorch_ext.datamodules.iceberg_module.IcebergDataModule
+  init_args:
+    batch_size: 8
+    num_workers: 2
+    bands:
+      - IW_VV
+      - IW_VH
+    data_root: /nr/bamjo/joftp/outgoing/fm4cs/data/iceberg_glkkldskl
+    no_data_replace: 0
+    no_label_replace: -1
+    #     ["IW_VV", "IW_VH"]:
+    #     means = [-12.985, -20.6958]
+    #     stds = [5.0062, 5.8688]
+    #     band_group = "group3"
+    #     ["IW_HH", "IW_HV"]:
+    #     means = [-13.9485, -22.8765]
+    #     stds = [6.1234, 6.5432]
+    #     band_group = "group4"
+    means:
+      - -12.985
+      - -20.6958
+    stds:
+      - 5.0062
+      - 5.8688
+    train_transform:
+      - class_path: thor_terratorch_ext.transforms.CropNonEmptyMaskIfExistsCompat
+        init_args:
+          height: 288
+          width: 288
+          p: 1.0
+          ignore_values: [-1]
+      - class_path: albumentations.pytorch.transforms.ToTensorV2
+    val_transform:
+      - class_path: thor_terratorch_ext.transforms.CropNonEmptyMaskIfExistsCompat
+        init_args:
+          height: 288
+          width: 288
+          p: 1.0
+          ignore_values: [-1]
+      - class_path: albumentations.pytorch.transforms.ToTensorV2
+
+model:
+  class_path: terratorch.tasks.ObjectDetectionTask
+  init_args:
+    model_factory: ObjectDetectionModelFactory
+    model_args:
+      framework: faster-rcnn # faster-rcnn, fcos, retinanet, mask-rcnn
+      backbone: thor_v1_tiny
+      backbone_pretrained: true
+      framework_min_size: 288
+      framework_max_size: 288
+      backbone_input_params:
+        ground_covers: [2880]
+        flexivit_patch_size_seqs:
+          - 4
+      backbone_out_indices: [2, 5, 8, 11]
+      backbone_model_bands:
+        - IW_VV
+        - IW_VH
+
+      num_classes: 2 # background + iceberg
+      necks:
+        - name: THORGroupReshapeTokensToImage
+        - name: LearnedInterpolateToPyramidal
+        - name: FeaturePyramidNetworkNeck
+
+    labels_field: class_labels
+    masks_field: mask
+    boxes_field: bboxes
+    class_names:
+      - background
+      - iceberg
+    iou_threshold: 0.2
+    score_threshold: 0.2
+    ignore_index: -1
+    freeze_backbone: true
+    freeze_decoder: false
+
+optimizer:
+  class_path: torch.optim.AdamW
+  init_args:
+    lr: 1e-4
+    weight_decay: 0.05
+
+lr_scheduler:
+  class_path: CosineAnnealingLR
+  init_args:
+    T_max: 20
