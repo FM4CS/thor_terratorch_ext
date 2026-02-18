@@ -62,7 +62,7 @@ data:
     val_label_data_root: work/training_patches_spectral_lidar_single_date_512x512/val/labels
     test_data_root: work/training_patches_spectral_lidar_single_date_512x512/val/image # TODO: change to test once available
     test_label_data_root: work/training_patches_spectral_lidar_single_date_512x512/val/labels # TODO: change to test once available
-    predict_data_root: work/prepare_data_spectral_lidar_single_date # THIS is the actual full data
+    predict_data_root: work/training_patches_spectral_lidar_single_date_512x512/val/image # TODO: change to test
 
     img_grep: "*_original.tif" # *_original.tif only non flipped images
     label_grep: "*_original.tif" # *_original.tif only non flipped images
