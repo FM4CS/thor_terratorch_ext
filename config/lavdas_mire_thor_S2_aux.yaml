@@ -1,0 +1,201 @@
+seed_everything: 0
+custom_modules_path: ./thor_terratorch_ext # Path relative to where you run terratorch
+trainer:
+  accelerator: gpu
+  strategy: auto
+  devices: auto
+  num_nodes: 1
+  precision: 16-mixed
+  logger:
+    class_path: WandbLogger
+    init_args:
+      name: lavdas_mire_v2_thor_fm4cs_S2_aux_2240m
+      project: terratorch
+      save_dir: /nr/bamjo/projects/fm4cs/usr/tforgaard/terratorch_results
+  callbacks:
+    - class_path: RichProgressBar
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
+      init_args:
+        logging_interval: epoch
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
+      init_args:
+        monitor: val/loss
+        patience: 20
+        mode: min
+        check_finite: false
+        verbose: true
+
+  max_epochs: 200
+  check_val_every_n_epoch: 1
+  accumulate_grad_batches: 1
+  log_every_n_steps: 1
+  enable_checkpointing: true
+  default_root_dir: /nr/bamjo/projects/fm4cs/usr/tforgaard/terratorch_results/results
+data:
+  class_path: GenericNonGeoSegmentationDataModule
+  init_args:
+    batch_size: 8
+    num_classes: 2
+    num_workers: 4
+    dataset_bands:
+      - BLUE
+      - GREEN
+      - RED
+      - NIR_BROAD
+      - RED_EDGE_1
+      - RED_EDGE_2
+      - RED_EDGE_3
+      - NIR_NARROW
+      - SWIR_1
+      - SWIR_2
+      - GRADIENT_AMPLITUDE
+      - VEGT_HEIGHT
+      - TERRAIN_WETNESS_INDEX
+    rgb_indices:
+      - 2
+      - 1
+      - 0
+
+    train_data_root: work/training_patches_spectral_lidar_single_date_512x512/train/image
+    train_label_data_root: work/training_patches_spectral_lidar_single_date_512x512/train/labels
+    val_data_root: work/training_patches_spectral_lidar_single_date_512x512/val/image
+    val_label_data_root: work/training_patches_spectral_lidar_single_date_512x512/val/labels
+    test_data_root: work/training_patches_spectral_lidar_single_date_512x512/val/image # TODO: change to test once available
+    test_label_data_root: work/training_patches_spectral_lidar_single_date_512x512/val/labels # TODO: change to test once available
+    predict_data_root: work/prepare_data_spectral_lidar_single_date # THIS is the actual full data
+
+    img_grep: "*_original.tif" # *_original.tif only non flipped images
+    label_grep: "*_original.tif" # *_original.tif only non flipped images
+    no_label_replace: -100 # NaNs in the label tif file will be replaced with this value
+    no_data_replace: 0 # "median" # NaNs in the image tif file will be replaced with this value
+
+    means:
+      - 0.12786234533104116
+      - 0.14382036980763166
+      - 0.1410327489323985
+      - 0.3045642804782939
+      - 0.18296300850517555
+      - 0.2628533713867794
+      - 0.2877546712519596
+      - 0.31319562198500356
+      - 0.24168500252496739
+      - 0.17894995437241773
+      - 0.03326524226338302
+      - 0.03566159365335445
+      - 0.3269367108785826
+
+    stds:
+      - 0.04330086432689183
+      - 0.0467469370915115
+      - 0.049265215814900704
+      - 0.11556372225893331
+      - 0.06178510983938001
+      - 0.09190737482982196
+      - 0.10296520615517919
+      - 0.11384286999698678
+      - 0.09239990304310298
+      - 0.06495671092927825
+      - 0.03994722174343505
+      - 0.0693010044024503
+      - 0.16476346728150312
+
+    # Transforms are shared between all image modalities (e.g. same crop area)
+    train_transform:
+      - class_path: albumentations.RandomCrop
+        init_args:
+          height: 224
+          width: 224
+      - class_path: albumentations.D4
+      - class_path: albumentations.pytorch.transforms.ToTensorV2
+
+model:
+  class_path: terratorch.tasks.SemanticSegmentationTask
+  init_args:
+    tiled_inference_on_testing: true
+    tiled_inference_on_validation: true
+    output_on_inference: probabilities
+    model_args:
+      backbone: MultiBackboneWrapper
+      backbone_bands:
+        - BLUE
+        - GREEN
+        - RED
+        - NIR_BROAD
+        - RED_EDGE_1
+        - RED_EDGE_2
+        - RED_EDGE_3
+        - NIR_NARROW
+        - SWIR_1
+        - SWIR_2
+        - GRADIENT_AMPLITUDE
+        - VEGT_HEIGHT
+        - TERRAIN_WETNESS_INDEX
+      backbone_merge_features: concat
+      backbone_rescale_features: null
+      backbone_encoders:
+        - thor_v1_base:
+            freeze_backbone: true
+            backbone_pretrained: true
+            backbone_input_params:
+              ground_covers: [2240] # m
+              flexivit_patch_size_seqs:
+                - 8 # Smallest possible patch size
+            backbone_out_indices: [2, 5, 8, 11]
+            backbone_model_bands:
+              - RED
+              - GREEN
+              - BLUE
+              - NIR_BROAD
+              - RED_EDGE_1
+              - RED_EDGE_2
+              - RED_EDGE_3
+              - NIR_NARROW
+              - SWIR_1
+              - SWIR_2
+            necks:
+              - name: THORGroupReshapeTokensToImage
+                merge: "mean" # "mean" # "sum" # "concat"
+        - vit_small_patch8_224.dino:
+            out_indices: [2, 5, 8, 11]
+            in_chans: 3
+            backbone_pretrained: true
+            backbone_dynamic_img_size: true
+            bands:
+              - GRADIENT_AMPLITUDE
+              - VEGT_HEIGHT
+              - TERRAIN_WETNESS_INDEX
+
+      decoder: UperNetDecoder
+      decoder_scale_modules: true
+      decoder_channels: 256
+      decoder_pool_scales: [1, 2, 3, 6]
+      num_classes: 2
+      head_dropout: 0.1
+      head_channel_list:
+        - 256
+    loss:
+      - dice
+      - ce
+    ignore_index: -100
+    class_weights:
+      - 0.3
+      - 0.7
+    freeze_backbone: false
+    freeze_decoder: false
+    model_factory: EncoderDecoderFactory
+    tiled_inference_parameters:
+      h_crop: 224
+      h_stride: 192
+      w_crop: 224
+      w_stride: 192
+      average_patches: true
+      batch_size: 4
+optimizer:
+  class_path: torch.optim.AdamW
+  init_args:
+    lr: 6e-5
+    weight_decay: 0.05
+lr_scheduler:
+  class_path: lightning.pytorch.cli.ReduceLROnPlateau
+  init_args:
+    monitor: val/loss
