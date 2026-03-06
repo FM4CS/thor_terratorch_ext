@@ -597,10 +597,9 @@ class THORGroupReshapeTokensToImage(Neck):
 
         """
 
-        warnings.warn(
+        logger.warning(
             "THORGroupReshapeTokensToImage is deprecated. "
             "Set merge_method in THOREncoderWrapper/load_thor_model instead.",
-            DeprecationWarning,
             stacklevel=2,
         )
         super().__init__(channel_list)
@@ -627,13 +626,6 @@ class THORGroupReshapeTokensToImage(Neck):
         **kwargs,
     ) -> list[torch.Tensor]:
         """Stack embeddings for each group, requires interpolation to the highest num_patch."""
-
-        warnings.warn(
-            "THORGroupReshapeTokensToImage is deprecated and will be removed in a future release. "
-            "Use THOREncoderWrapper(merge_method=...) instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
 
         if (
             isinstance(features, list)
@@ -953,7 +945,6 @@ def load_thor_model(
 
     return_channel_params = kwargs.pop("return_channel_params", False)
     merge_method = kwargs.pop("merge_method", None)
-
 
     default_input_params = deepcopy(_default_input_params)
     default_input_params["channels"].update(channel_params_updated)
