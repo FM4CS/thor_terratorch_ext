@@ -92,6 +92,7 @@ model:
     model_args:
       framework: faster-rcnn # faster-rcnn, fcos, retinanet, mask-rcnn
       backbone: thor_v1_tiny
+      backbone_merge_method: mean
       backbone_pretrained: true
       framework_min_size: 288
       framework_max_size: 288
@@ -106,7 +107,6 @@ model:
 
       num_classes: 2 # background + iceberg
       necks:
-        - name: THORGroupReshapeTokensToImage
         - name: LearnedInterpolateToPyramidal
         - name: FeaturePyramidNetworkNeck
 

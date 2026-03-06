@@ -115,6 +115,7 @@ model:
     model_args:
       backbone_pretrained: true
       backbone: thor_v1_base
+      backbone_merge_method: mean
       backbone_input_params:
         ground_covers: [2880]
         flexivit_patch_size_seqs:
@@ -141,8 +142,6 @@ model:
       head_dropout: 0.1
       head_channel_list:
         - 256
-      necks:
-        - name: THORGroupReshapeTokensToImage
     loss: ce
     ignore_index: -1
     class_weights:

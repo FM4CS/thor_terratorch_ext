@@ -91,10 +91,9 @@ predict_output_dir: './'
 model:
   class_path: terratorch.tasks.EmbeddingGenerationTask
   init_args:
-    model: terratorch_thor_vit_base_encoder_alibi_patch_size_embed_v1
+    model: thor_v1_base
     model_args:
       pretrained: true
-      ckpt: /nr/bamjo/projects/fm4cs/usr/tforgaard/fm4cs_results/thor/thor_v1_vit_base.pt
       model_bands:
         # - COASTAL_AEROSOL
         - BLUE
@@ -109,8 +108,7 @@ model:
         # - CIRRUS # Not present in THOR
         - SWIR_1
         - SWIR_2
-      model_ckpt_type: encoder
-      return_channel_params: true
+      merge_method: mean
       input_params:
         ground_covers: [2880]
         flexivit_patch_size_seqs: 

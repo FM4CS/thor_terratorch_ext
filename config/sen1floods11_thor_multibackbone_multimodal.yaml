@@ -167,12 +167,9 @@ model:
       backbone_merge_features: concat
       backbone_rescale_features: null
       backbone_encoders:
-        - terratorch_thor_vit_base_encoder_alibi_patch_size_embed_v1:
+        - thor_v1_base:
             freeze_backbone: true
-            backbone_pretrained: true
-            backbone_ckpt: /nr/bamjo/projects/fm4cs/usr/tforgaard/fm4cs_results/thor/thor_v1_vit_base.pt
-            backbone_model_ckpt_type: encoder
-            backbone_return_channel_params: true
+            backbone_merge_method: mean
             backbone_input_params:
               ground_covers: [2880]
               flexivit_patch_size_seqs:
@@ -192,8 +189,6 @@ model:
               # - CIRRUS # Not present in THOR
               - SWIR_1
               - SWIR_2
-            necks:
-              - name: THORGroupReshapeTokensToImage
         - vit_small_patch16_224.dino:
             out_indices: [-1]
             in_chans: 2

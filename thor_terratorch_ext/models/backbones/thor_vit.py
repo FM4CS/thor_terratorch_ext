@@ -597,6 +597,12 @@ class THORGroupReshapeTokensToImage(Neck):
 
         """
 
+        warnings.warn(
+            "THORGroupReshapeTokensToImage is deprecated. "
+            "Set merge_method in THOREncoderWrapper/load_thor_model instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         super().__init__(channel_list)
 
         # TODO: add support for or make other necks which allow for alternatives to interpolation and channel wise concat
@@ -607,7 +613,7 @@ class THORGroupReshapeTokensToImage(Neck):
         )
 
         self.single_embedding_shape = self.channel_list[0]
-        self.groups = AVAILABLE_GROUPS
+        self.groups = dict(AVAILABLE_GROUPS)
         assert merge in ["concat", "sum", "mean"], (
             "Merge must be either 'concat', 'sum' or 'mean'"
         )
@@ -621,6 +627,24 @@ class THORGroupReshapeTokensToImage(Neck):
         **kwargs,
     ) -> list[torch.Tensor]:
         """Stack embeddings for each group, requires interpolation to the highest num_patch."""
+
+        warnings.warn(
+            "THORGroupReshapeTokensToImage is deprecated and will be removed in a future release. "
+            "Use THOREncoderWrapper(merge_method=...) instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
+        if (
+            isinstance(features, list)
+            and features
+            and isinstance(features[0], torch.Tensor)
+            and features[0].dim() == 4
+        ):
+            logger.debug(
+                "THORGroupReshapeTokensToImage received already-merged image features, returning input unchanged."
+            )
+            return features
 
         if isinstance(features, tuple):
             features, channel_params = features
@@ -697,11 +721,19 @@ class THOREncoderWrapper(nn.Module):
         bands: list[str] | None = None,
         out_indices: list[int] | None = None,
         return_channel_params: bool = False,
+        merge_method: Literal["concat", "sum", "mean"] | None = None,
     ) -> None:
         super().__init__()
 
         self.model = model
         self.return_channel_params = return_channel_params
+        if merge_method not in ["concat", "sum", "mean", None]:
+            msg = (
+                f"Unknown merge_method={merge_method!r}. "
+                "Expected one of 'concat', 'sum', 'mean', or None."
+            )
+            raise ValueError(msg)
+        self.merge_method = merge_method
         self.channels = self.model.channels
 
         if bands is None:
@@ -710,10 +742,16 @@ class THOREncoderWrapper(nn.Module):
         self.bands = bands
         self.band_index = list(range(len(bands)))
         self.groups = self.model.get_available_groups(dict.fromkeys(self.bands, None))
-        ########NOTE: DUBIOUS CODE BELOW ############
-        all_group_keys = list(AVAILABLE_GROUPS.keys())
+        # Reset and update AVAILABLE_GROUPS so the neck (created after the encoder)
+        # sees the correct groups for *this* model, without permanently corrupting the
+        # global for models created earlier in the same session.
+        AVAILABLE_GROUPS.clear()
+        AVAILABLE_GROUPS.update({
+            f"group{i}": group
+            for i, group in enumerate(_default_input_params["groups"])
+        })
         removed_groups = []
-        for group_name in all_group_keys:
+        for group_name in list(AVAILABLE_GROUPS.keys()):
             if group_name not in self.groups:
                 removed_groups.append(group_name)
                 del AVAILABLE_GROUPS[group_name]
@@ -721,15 +759,11 @@ class THOREncoderWrapper(nn.Module):
             logger.info(
                 f"Removed groups: {removed_groups}. Remaining groups: {list(AVAILABLE_GROUPS.keys())}"
             )
-        #########################################
 
         logger.info(f"Groups: {self.groups}")
         logger.info(f"Bands: {self.bands}")
 
         self.single_embedding_shape = self.model.state_dict()["norm.bias"].shape[0]
-
-        self.inner_forward = self.model.forward_intermediates
-        self.forward = self._forward_vit
 
         lowest_gsd = 1000000
         for group_member in self.groups.values():
@@ -756,6 +790,10 @@ class THOREncoderWrapper(nn.Module):
 
     @property
     def out_channels(self):
+        if self.merge_method == "concat":
+            return [self.single_embedding_shape * len(self.groups)] * len(
+                self.out_indices
+            )
         return [self.single_embedding_shape] * len(self.out_indices)
 
     def _preprocess_input(self, x):
@@ -773,15 +811,90 @@ class THOREncoderWrapper(nn.Module):
 
         return x
 
-    def _forward_vit(self, x, **kwargs):
+    def _merge_tokens_to_image_features(
+        self,
+        features: list[torch.Tensor],
+        channel_params: dict[str, dict[str, Any]],
+    ) -> list[torch.Tensor]:
+        highest_num_patch = 0
+        for _channel, params in channel_params.items():
+            num_patch = params["num_patch"]
+            highest_num_patch = max(highest_num_patch, num_patch)
+
+        out_features = []
+        for feature in features:
+            x = feature
+
+            start_idx = 0
+            grouped = []
+            # Important that we iterate through this in the same order we encoded.
+            for group_members in self.groups.values():
+                member = next((m for m in group_members if m in channel_params), None)
+                if member is None:
+                    msg = f"None of the group members {group_members} found in channel_params"
+                    raise ValueError(msg)
+
+                num_patch = channel_params[member]["num_patch"]
+
+                x_ = x[:, start_idx : start_idx + num_patch**2, :].reshape(
+                    -1, num_patch, num_patch, self.single_embedding_shape
+                )  # B, num_patch, num_patch, C
+                x_ = x_.permute(0, 3, 1, 2)  # B, C, H, W
+                if num_patch != highest_num_patch:
+                    x_ = F.interpolate(
+                        x_,
+                        size=(highest_num_patch, highest_num_patch),
+                        mode="bilinear",
+                    )
+
+                grouped.append(x_)
+                start_idx += num_patch**2
+
+            if start_idx != x.shape[1]:
+                msg = f"Number of patches used: {start_idx} does not match input shape {x.shape[1]}"
+                raise ValueError(msg)
+
+            if self.merge_method == "sum":
+                out = torch.sum(torch.stack(grouped), dim=0)
+            elif self.merge_method == "mean":
+                out = torch.mean(torch.stack(grouped), dim=0)
+            elif self.merge_method == "concat":
+                out = torch.cat(grouped, dim=1)
+            else:
+                msg = f"Unsupported merge_method: {self.merge_method}"
+                raise NotImplementedError(msg)
+
+            out_features.append(out)
+
+        return out_features
+
+    def forward(
+        self, x, **kwargs
+    ) -> list[torch.Tensor] | tuple[list[torch.Tensor], dict[str, Any]]:
+
         x = self._preprocess_input(x)
-        x = self.inner_forward(
+
+        return_channel_params = (
+            self.return_channel_params or self.merge_method is not None
+        )
+        features = self.model.forward_intermediates(
             x,
             indices=self.out_indices,
             intermediates_only=True,
-            return_channel_params=self.return_channel_params,
+            return_channel_params=return_channel_params,
         )
-        return x
+
+        # Return features and potentially channel_params as is
+        if self.merge_method is None:
+            return features
+
+        token_features, channel_params = features
+        merged_token_features = self._merge_tokens_to_image_features(
+            token_features, channel_params
+        )
+        if self.return_channel_params:
+            return merged_token_features, channel_params
+        return merged_token_features
 
     def summary(self):
         pass
@@ -791,9 +904,10 @@ def load_thor_model(
     model_name: str,
     model_bands: list[
         HLSBands | OpticalBands | SARBands | SARThorBands | OLCIBands | SLSTRBands
-    ],
+    ]
+    | None = None,
     out_indices: list[int] | None = None,
-    pretrained: bool = False,
+    pretrained: bool = True,
     **kwargs,
 ):
     # If short name provided, map to full model name
@@ -801,11 +915,30 @@ def load_thor_model(
         model_name = next(
             key for key, value in name_mapping.items() if value == model_name
         )
-        logger.info(f"Mapped model name to full THOR model name: {model_name}")
+        logger.debug(f"Mapped model name to full THOR model name: {model_name}")
+
+    if model_bands is None:
+        logger.info("Model bands not provided, using HLS and SAR bands by default")
+        model_bands = [
+            HLSBands.COASTAL_AEROSOL,
+            HLSBands.BLUE,
+            HLSBands.GREEN,
+            HLSBands.RED,
+            HLSBands.NIR_BROAD,
+            HLSBands.RED_EDGE_1,
+            HLSBands.RED_EDGE_2,
+            HLSBands.RED_EDGE_3,
+            HLSBands.NIR_NARROW,
+            HLSBands.SWIR_1,
+            HLSBands.SWIR_2,
+            HLSBands.WATER_VAPOR,
+            SARBands.VV,
+            SARBands.VH,
+        ]
 
     # Map to THOR bands names and get updated channel params if necessary
     bands, channel_params_updated = process_thor_bands(model_bands)
-    logger.info(f"bands mapped to thor: {bands}")
+    logger.debug(f"bands mapped to thor: {bands}")
 
     config = kwargs.pop("config", None)
     if isinstance(config, str | Path):
@@ -818,7 +951,9 @@ def load_thor_model(
         "input_params", {}
     )  # dict with input params to override config if provided
 
-    return_channel_params = kwargs.pop("return_channel_params", True)
+    return_channel_params = kwargs.pop("return_channel_params", False)
+    merge_method = kwargs.pop("merge_method", None)
+
 
     default_input_params = deepcopy(_default_input_params)
     default_input_params["channels"].update(channel_params_updated)
@@ -902,6 +1037,7 @@ def load_thor_model(
         bands=bands,
         out_indices=out_indices,
         return_channel_params=return_channel_params,
+        merge_method=merge_method,
     )
 
 
