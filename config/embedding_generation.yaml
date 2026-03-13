@@ -89,10 +89,10 @@ predict_output_dir: './'
 model:
   class_path: terratorch.tasks.EmbeddingGenerationTask
   init_args:
-    model: thor_v1_base
     model_args:
-      pretrained: true
-      model_bands:
+      backbone: thor_v1_base
+      backbone_pretrained: true
+      backbone_model_bands:
         # - COASTAL_AEROSOL
         - BLUE
         - GREEN
@@ -106,12 +106,12 @@ model:
         # - CIRRUS # Not present in THOR
         - SWIR_1
         - SWIR_2
-      merge_method: concat
-      input_params:
+      backbone_merge_method: concat
+      backbone_input_params:
         ground_covers: [2880]
-        flexivit_patch_size_seqs: 
+        flexivit_patch_size_seqs:
           - 16
-      out_indices: [-1]
+      backbone_out_indices: [-1]
     output_format: tiff
     output_dir: 'output/thor_embeddings'
     layers: [-1] # Model layers to extract embeddings from, -1 means the last layer

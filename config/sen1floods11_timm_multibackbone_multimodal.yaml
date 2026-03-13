@@ -15,10 +15,10 @@ trainer:
       save_dir: ./terratorch_results
   callbacks:
     - class_path: RichProgressBar
-    - class_path: LearningRateMonitor
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
       init_args:
         logging_interval: epoch
-    - class_path: EarlyStopping
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
       init_args:
         monitor: val/loss
         patience: 20
@@ -169,6 +169,7 @@ model:
         - vit_small_patch16_224.dino:
             out_indices: [-1]
             backbone_dynamic_img_size: true
+            backbone_pretrained: true
             in_chans: 10
             bands:
               # - COASTAL_AEROSOL
@@ -187,6 +188,7 @@ model:
         - vit_small_patch16_224.dino:
             out_indices: [-1]
             backbone_dynamic_img_size: true
+            backbone_pretrained: true
             in_chans: 2
             bands:
               - VV
@@ -219,6 +221,6 @@ optimizer:
     lr: 6e-5
     weight_decay: 0.05
 lr_scheduler:
-  class_path: ReduceLROnPlateau
+  class_path: lightning.pytorch.cli.ReduceLROnPlateau
   init_args:
     monitor: val/loss

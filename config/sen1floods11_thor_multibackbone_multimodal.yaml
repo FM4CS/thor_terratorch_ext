@@ -15,10 +15,10 @@ trainer:
       save_dir: ./terratorch_results
   callbacks:
     - class_path: RichProgressBar
-    - class_path: LearningRateMonitor
+    - class_path: lightning.pytorch.callbacks.LearningRateMonitor
       init_args:
         logging_interval: epoch
-    - class_path: EarlyStopping
+    - class_path: lightning.pytorch.callbacks.EarlyStopping
       init_args:
         monitor: val/loss
         patience: 20
@@ -146,7 +146,7 @@ model:
     tiled_inference_on_testing: true
     tiled_inference_on_validation: true
     model_args:
-      backbone: MultiBackboneWrapper # multi_backbone_wrapper
+      backbone: MultiBackboneWrapper
       backbone_bands:
         # - COASTAL_AEROSOL
         - BLUE
@@ -192,6 +192,7 @@ model:
         - vit_small_patch16_224.dino:
             out_indices: [-1]
             in_chans: 2
+            backbone_pretrained: true
             backbone_dynamic_img_size: true
             bands:
               - IW_VV
@@ -224,6 +225,6 @@ optimizer:
     lr: 6e-5
     weight_decay: 0.05
 lr_scheduler:
-  class_path: ReduceLROnPlateau
+  class_path: lightning.pytorch.cli.ReduceLROnPlateau
   init_args:
     monitor: val/loss
