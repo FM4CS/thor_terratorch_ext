@@ -35,8 +35,8 @@ trainer:
 data:
   class_path: terratorch.datamodules.GenericMultiModalDataModule
   init_args:
-    task: 'segmentation'
-    batch_size: 4
+    task: segmentation
+    batch_size: 2
     num_workers: 4
     modalities: # Define names of modalities
       - S2L2A
@@ -151,7 +151,7 @@ model:
       backbone_merge_method: concat
       backbone_input_params:
         ground_covers: [2880]
-        flexivit_patch_size_seqs: 
+        flexivit_patch_size_seqs:
           - 8
       backbone_out_indices: [-1]
       backbone_model_bands:

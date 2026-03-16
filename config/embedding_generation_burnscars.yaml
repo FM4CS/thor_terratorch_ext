@@ -1,0 +1,54 @@
+# lightning.pytorch==2.1.1
+custom_modules_path: ./thor_terratorch_ext # Path relative to where you run terratorch
+seed_everything: 0
+trainer:
+  accelerator: auto
+  strategy: auto
+  devices: auto
+  num_nodes: 1
+  callbacks: []
+  max_epochs: 0
+
+data:
+  class_path: terratorch.datamodules.GenericNonGeoSegmentationDataModule
+  init_args:
+    batch_size: 8
+    check_stackability: False
+    num_workers: 8
+    no_data_replace: 0
+    num_classes: 2
+    img_grep: "*_merged.tif"
+
+    train_data_root: none
+    val_data_root: none
+    test_data_root: none
+    predict_data_root: hls_burn_scars/data
+    means: [0.1503, 0.1718, 0.1853, 0.3132, 0.2424, 0.1857]
+    stds: [0.2141, 0.2038, 0.2134, 0.1753, 0.1434, 0.1334]
+
+predict_output_dir: "./"
+
+model:
+  class_path: terratorch.tasks.EmbeddingGenerationTask
+  init_args:
+    model_args:
+      backbone: thor_v1_base
+      backbone_pretrained: true
+      backbone_model_bands:
+        - BLUE
+        - GREEN
+        - RED
+        - NIR_NARROW
+        - SWIR_1
+        - SWIR_2
+      backbone_merge_method: mean
+      backbone_input_params:
+        ground_covers: [2880]
+        flexivit_patch_size_seqs:
+          - 8
+      backbone_out_indices: [-1]
+    output_format: tiff
+    output_dir: "output/thor_embeddings"
+    layers: [-1] # Model layers to extract embeddings from, -1 means the last layer
+    embedding_pooling: null
+    has_cls: False

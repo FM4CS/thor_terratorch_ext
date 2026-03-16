@@ -3,7 +3,7 @@ custom_modules_path: ./thor_terratorch_ext # Path relative to where you run terr
 trainer:
   accelerator: gpu
   strategy: auto
-  devices: [3]
+  devices: auto
   num_nodes: 1
   precision: 16-mixed
   logger:

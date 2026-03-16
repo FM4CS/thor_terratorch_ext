@@ -11,10 +11,12 @@ import albumentations as A
 import h5py
 import matplotlib.pyplot as plt
 import numpy as np
-import xarray as xr
+
+# import xarray as xr
 from matplotlib import colors
 from matplotlib.figure import Figure
-from matplotlib.patches import Rectangle
+
+# from matplotlib.patches import Rectangle
 from terratorch.datasets.utils import (
     clip_image_percentile,
     default_transform,
@@ -303,7 +305,7 @@ class IcebergDataset(NonGeoDataset):
             ax[4].imshow(prediction, cmap="jet", norm=norm)
             # ax[4].imshow(prediction, cmap=cmap)  # , norm=norm)
 
-        cmap = plt.get_cmap("jet")
+        # cmap = plt.get_cmap("jet")
         # legend_data = []
         # for i, _ in enumerate(range(0, num_classes + 1)):
         #     if i < num_classes:

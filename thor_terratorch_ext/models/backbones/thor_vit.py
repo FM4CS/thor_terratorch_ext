@@ -738,10 +738,12 @@ class THOREncoderWrapper(nn.Module):
         # sees the correct groups for *this* model, without permanently corrupting the
         # global for models created earlier in the same session.
         AVAILABLE_GROUPS.clear()
-        AVAILABLE_GROUPS.update({
-            f"group{i}": group
-            for i, group in enumerate(_default_input_params["groups"])
-        })
+        AVAILABLE_GROUPS.update(
+            {
+                f"group{i}": group
+                for i, group in enumerate(_default_input_params["groups"])
+            }
+        )
         removed_groups = []
         for group_name in list(AVAILABLE_GROUPS.keys()):
             if group_name not in self.groups:

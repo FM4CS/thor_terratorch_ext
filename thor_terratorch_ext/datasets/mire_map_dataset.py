@@ -222,10 +222,12 @@ class MireMapDataset(NonGeoDataset):
             labels_to_use = sorted(
                 set(self.LABEL_COLORMAP.keys()) - set(self.IGNORE_CLASSES)
             )
-            self.label_mapping = tuple([
-                (key, index) if key != 255 else (key, 255)
-                for index, key in enumerate(labels_to_use)
-            ])
+            self.label_mapping = tuple(
+                [
+                    (key, index) if key != 255 else (key, 255)
+                    for index, key in enumerate(labels_to_use)
+                ]
+            )
             self.num_classes = len(labels_to_use) - 1
         elif mode == "binary":
             self.label_mapping = (
@@ -342,9 +344,9 @@ class MireMapDataset(NonGeoDataset):
         else:
             prediction_display = None
         logger.debug(f"unique labels plot after mapping {np.unique(mask_display)}")
-        cmap = colors.ListedColormap([
-            np.array(color) / 255.0 for color in mire_colormap.values()
-        ])
+        cmap = colors.ListedColormap(
+            [np.array(color) / 255.0 for color in mire_colormap.values()]
+        )
         norm = colors.Normalize(vmin=0, vmax=len(mire_colormap) - 1)
 
         ax[1].axis("off")

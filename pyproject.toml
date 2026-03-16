@@ -20,12 +20,22 @@ include = ["thor_terratorch_ext*"]
 
 [dependency-groups]
 dev = [
+    "nbclient>=0.10.4",
+    "nbconvert>=7.17.0",
+    "nbformat>=5.10.4",
+    "pytest>=9.0.2",
+    "ruff>=0.14.8",
+]
+notebook = [
+    "matplotlib>=3.7",
+    "odc-stac>=0.5.2",
+    "pystac-client>=0.9.0",
+    "stac-asset>=0.4.7",
+    "boto3>=1.42.61",
     "gdown>=5.2.1",
+    "phidown[jupyter-env,viz]>=0.1.25",
     "ipykernel>=7.2.0",
     "ipython>=8.37.0",
     "ipywidgets>=8.1.8",
-    "ruff>=0.14.8",
 ]
-log = [
-    "wandb>=0.19.11",
-]
+log = ["wandb>=0.19.11"]
