@@ -103,6 +103,7 @@ MODALITY_BAND_MAPPING: dict[
     ThorModalities.S1GRD_VV_VH: [SARThorBands.IW_VV, SARThorBands.IW_VH],
     ThorModalities.S1GRD_HH_HV: [SARThorBands.IW_HH, SARThorBands.IW_HV],
     ThorModalities.S2L2A: [band for band in S2L2ABands],
+    ThorModalities.S3: [*S3OLCIBands, *S3SLSTRBands],
     ThorModalities.S3OLCI: [band for band in S3OLCIBands],
     ThorModalities.S3SLSTR: [band for band in S3SLSTRBands],
     ThorModalities.S3SLSTR_REFL: [

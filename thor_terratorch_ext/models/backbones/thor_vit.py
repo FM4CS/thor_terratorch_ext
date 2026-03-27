@@ -3,8 +3,8 @@ import warnings
 from copy import deepcopy
 from functools import partial
 from pathlib import Path
-from typing import Any, Iterable, Literal
-from collections.abc import Sequence
+from typing import Any, Literal
+from collections.abc import Iterable, Sequence
 
 import numpy as np
 import torch
@@ -28,7 +28,7 @@ from thor_terratorch_ext.datasets.utils import (
 logger = logging.getLogger(__name__)
 
 
-_default_input_params = {
+_default_input_params: dict[str, Any] = {
     "ground_covers": [2880],  # m
     "aggr_type": "subsetmean",
     "use_superposition_encoding": False,
@@ -160,18 +160,18 @@ _user_overridable_params = {
     "select_patch_strategy": "Strategy for choosing patch sizes across groups (min, max, equal-*)",
 }
 
-
-def _format_overridable_params() -> str:
-    return ", ".join(
-        f"{key}: {_user_overridable_params[key]}"
-        for key in sorted(_user_overridable_params)
-    )
+_DEFAULT_GROUPS: dict[str, list[str]] = {
+    f"group{i}": group for i, group in enumerate(_default_input_params["groups"])
+}
 
 
 def _ensure_allowed_input_params(keys: Iterable[str]) -> None:
     disallowed_keys = sorted(set(keys) - set(_user_overridable_params))
     if disallowed_keys:
-        allowed_str = _format_overridable_params()
+        allowed_str = ", ".join(
+            f"{key}: {_user_overridable_params[key]}"
+            for key in sorted(_user_overridable_params)
+        )
         msg = (
             "Cannot override the following THOR ViT input params via configuration: "
             f"{disallowed_keys}. Allowed keys: {allowed_str}"
@@ -405,9 +405,6 @@ def process_thor_bands(
     """
     thor_bands = []
     channel_params = deepcopy(_default_input_params["channels"])
-    _default_groups = {
-        f"group{i}": group for i, group in enumerate(_default_input_params["groups"])
-    }
     for band in bands:
         if not isinstance(band, str):
             band = band.value
@@ -434,7 +431,7 @@ def process_thor_bands(
                     )
                 channel_params[thor_band]["GSD"] = int(gsd_str)
                 group_channel_members = None
-                for group in _default_groups.values():
+                for group in _DEFAULT_GROUPS.values():
                     if thor_band in group:
                         group_channel_members = group
                         break
@@ -472,7 +469,7 @@ def process_thor_bands(
 class THOREncoderWrapper(nn.Module):
     def __init__(
         self,
-        model: nn.Module = None,
+        model: Any,
         bands: list[str] | None = None,
         out_indices: list[int] | None = None,
         return_channel_params: bool = False,
@@ -489,7 +486,7 @@ class THOREncoderWrapper(nn.Module):
             )
             raise ValueError(msg)
         self.merge_method = merge_method
-        self.channels = self.model.channels
+        self.channels: dict[str, dict[str, Any]] = self.model.channels
 
         if bands is None:
             logger.info("Bands not provided, using model default bands")
@@ -497,18 +494,6 @@ class THOREncoderWrapper(nn.Module):
         self.bands = bands
         self.band_index = list(range(len(bands)))
         self.groups = self.model.get_available_groups(dict.fromkeys(self.bands, None))
-        _default_groups = {
-            f"group{i}": group
-            for i, group in enumerate(_default_input_params["groups"])
-        }
-        removed_groups = []
-        for group_name in list(_default_groups.keys()):
-            if group_name not in self.groups:
-                removed_groups.append(group_name)
-        if removed_groups:
-            logger.info(
-                f"Removed groups: {removed_groups}. Remaining groups: {list(self.groups.keys())}"
-            )
 
         logger.info(f"Groups: {self.groups}")
         logger.info(f"Bands: {self.bands}")
@@ -523,7 +508,7 @@ class THOREncoderWrapper(nn.Module):
 
         if out_indices is None:
             num_blocks = len(self.model.blocks)
-            out_indices = list(range(0, num_blocks, 1))  # every block
+            out_indices = list(range(num_blocks))
         self.out_indices = out_indices
 
         # TODO: do this a better way
@@ -567,18 +552,12 @@ class THOREncoderWrapper(nn.Module):
                         raise ValueError(
                             f"Modality '{modality}': expected at least {ch_idx + 1} channels for band '{band_name}' but tensor only has {tensor.shape[1]} channels."
                         )
+                    size = int(
+                        self.ground_cover / self.channels[internal_band_name]["GSD"]
+                    )
                     result[internal_band_name] = F.interpolate(
                         tensor[:, [ch_idx], :, :],
-                        (
-                            int(
-                                self.ground_cover
-                                / self.channels[internal_band_name]["GSD"]
-                            ),
-                            int(
-                                self.ground_cover
-                                / self.channels[internal_band_name]["GSD"]
-                            ),
-                        ),
+                        (size, size),
                         mode="bilinear",
                     )
             if not result:
@@ -593,8 +572,8 @@ class THOREncoderWrapper(nn.Module):
                 channel: F.interpolate(
                     x[:, [band_index], :, :],
                     (
-                        int(self.ground_cover / self.channels[channel]["GSD"]),
-                        int(self.ground_cover / self.channels[channel]["GSD"]),
+                        size := int(self.ground_cover / self.channels[channel]["GSD"]),
+                        size,
                     ),
                     mode="bilinear",
                 )
@@ -633,15 +612,16 @@ class THOREncoderWrapper(nn.Module):
                     -1, num_patch, num_patch, self.single_embedding_shape
                 )  # B, num_patch, num_patch, C
                 x_ = x_.permute(0, 3, 1, 2)  # B, C, H, W
-                if num_patch != highest_num_patch and self.merge_method != "group":
-                    x_ = F.interpolate(
-                        x_,
-                        size=(highest_num_patch, highest_num_patch),
-                        mode="bilinear",
-                    )
-                    grouped.append(x_)
-                else:
+                if self.merge_method == "group":
                     grouped_tokens[member] = x_
+                else:
+                    if num_patch != highest_num_patch:
+                        x_ = F.interpolate(
+                            x_,
+                            size=(highest_num_patch, highest_num_patch),
+                            mode="bilinear",
+                        )
+                    grouped.append(x_)
 
                 start_idx += num_patch**2
 
@@ -746,10 +726,6 @@ def bands_from_modalities(
                     raise ValueError(
                         f"Invalid modality '{modality}' in modalities dict. Expected one of {[m.value for m in ThorModalities]}."
                     ) from e
-            for band in MODALITY_BAND_MAPPING[modality]:
-                if band not in seen:
-                    bands.append(band)
-                    seen.add(band)
             available = set(MODALITY_BAND_MAPPING[modality])
             for band in subset:
                 if band not in available:
@@ -819,7 +795,7 @@ def load_thor_model(
     config = kwargs.pop("config", None)
     if isinstance(config, str | Path):
         logger.info(f"Loading backbone config from {config}")
-        config = yaml.safe_load(open(config))
+        config = yaml.safe_load(Path(config).read_text())
     ckpt_path = kwargs.pop(
         "ckpt", None
     )  # path to checkpoint to load, will override config if provided
