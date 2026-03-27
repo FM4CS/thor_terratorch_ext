@@ -19,10 +19,10 @@ import math
 from typing import TYPE_CHECKING
 
 import numpy as np
-from thor_terratorch_ext.datasets.utils import OLCIBands, SLSTRBands
 
 if TYPE_CHECKING:
     import datetime
+
     from numpy.typing import NDArray
 
 # ── Band constants ─────────────────────────────────────────────────────────────
@@ -139,8 +139,8 @@ def interp_tie_points(tie_arr: NDArray, target_shape: tuple[int, int]) -> NDArra
     NaN values in *tie_arr* are filled with nearest-neighbour values before
     interpolation (``RectBivariateSpline`` does not handle NaN).
     """
-    from scipy.ndimage import distance_transform_edt
     from scipy.interpolate import RectBivariateSpline
+    from scipy.ndimage import distance_transform_edt
 
     if np.isnan(tie_arr).any():
         _, idx = distance_transform_edt(np.isnan(tie_arr), return_indices=True)
@@ -265,39 +265,4 @@ def fill_nan(arr: NDArray) -> NDArray:
         finite_median = np.nanmedian(out[b])
         fill_val = 0.0 if np.isnan(finite_median) else float(finite_median)
         out[b] = np.where(np.isnan(out[b]), fill_val, out[b])
-    return out
-
-
-def normalise_for_thor(
-    arr: NDArray, band_keys: list[str | SLSTRBands | OLCIBands]
-) -> NDArray:
-    """Normalise a (C, H, W) array using THOR pretraining statistics.
-
-    Parameters
-    ----------
-    arr:
-        Float array of shape (C, H, W).  NaN values are replaced by the
-        band mean before normalisation.
-    band_keys:
-        List of C THOR band keys, e.g.
-        ``['S3:Oa01_reflectance', ..., 'S3:S1_reflectance_an', ...]``.
-
-    Returns
-    -------
-    np.ndarray
-        Normalised array, same shape as *arr*.
-    """
-    from thor_terratorch_ext.models.backbones.thor_vit import (
-        THOR_NORMALIZATION_PARAMS,
-        lookup_band,
-    )
-
-    band_keys: list[str] = [k.value if not isinstance(k, str) else k for k in band_keys]
-    band_keys = [lookup_band.get(k, k) for k in band_keys]
-
-    out = arr.copy()
-    for i, key in enumerate(band_keys):
-        m = THOR_NORMALIZATION_PARAMS[key]["mean"]
-        s = THOR_NORMALIZATION_PARAMS[key]["std"]
-        out[i] = (np.nan_to_num(arr[i], nan=m) - m) / s
     return out

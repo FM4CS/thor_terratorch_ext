@@ -16,11 +16,12 @@ from torch import nn
 
 
 try:
-    from thor_terratorch_ext.datasets.utils import OLCIBands, SARThorBands, SLSTRBands
+    from thor_terratorch_ext.datasets.utils import S2L2ABands, S3OLCIBands, SARThorBands, S3SLSTRBands
 except Exception:  # pragma: no cover - optional bands
-    OLCIBands = None
+    S2L2ABands = None
+    S3OLCIBands = None
     SARThorBands = None
-    SLSTRBands = None
+    S3SLSTRBands = None
 
 import logging
 
@@ -61,9 +62,10 @@ class MultiBackboneWrapper(nn.Module):
             HLSBands
             | OpticalBands
             | SARBands
+            | S2L2ABands
             | SARThorBands
-            | OLCIBands
-            | SLSTRBands
+            | S3OLCIBands
+            | S3SLSTRBands
             | int
         ]
         | None = None,
