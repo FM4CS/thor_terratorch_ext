@@ -2,7 +2,10 @@ from enum import Enum
 
 
 class ThorModalities(Enum):
-    """Supported modality keys for THOR."""
+    """Supported modality keys for THOR.
+
+    Each value matches a key in ``MODALITY_BAND_MAPPING``.
+    """
 
     # -- Sentinel-1 GRD -------------------------------------------------------
     # V-transmit dual-pol (VV + VH) – land / ocean globally
@@ -91,3 +94,19 @@ class S3SLSTRBands(Enum):
     S7_BT_IN = "S7_BT_IN"
     S8_BT_IN = "S8_BT_IN"
     S9_BT_IN = "S9_BT_IN"
+
+
+MODALITY_BAND_MAPPING: dict[
+    ThorModalities, list[S2L2ABands | SARThorBands | S3OLCIBands | S3SLSTRBands]
+] = {
+    ThorModalities.S1GRD: [SARThorBands.IW_VV, SARThorBands.IW_VH],
+    ThorModalities.S1GRD_VV_VH: [SARThorBands.IW_VV, SARThorBands.IW_VH],
+    ThorModalities.S1GRD_HH_HV: [SARThorBands.IW_HH, SARThorBands.IW_HV],
+    ThorModalities.S2L2A: [band for band in S2L2ABands],
+    ThorModalities.S3OLCI: [band for band in S3OLCIBands],
+    ThorModalities.S3SLSTR: [band for band in S3SLSTRBands],
+    ThorModalities.S3SLSTR_REFL: [
+        band for band in S3SLSTRBands if "REFLECTANCE" in band.value
+    ],
+    ThorModalities.S3SLSTR_BT: [band for band in S3SLSTRBands if "BT_IN" in band.value],
+}

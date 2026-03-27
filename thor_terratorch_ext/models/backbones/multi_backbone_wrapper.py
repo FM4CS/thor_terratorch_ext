@@ -16,7 +16,12 @@ from torch import nn
 
 
 try:
-    from thor_terratorch_ext.datasets.utils import S2L2ABands, S3OLCIBands, SARThorBands, S3SLSTRBands
+    from thor_terratorch_ext.datasets.utils import (
+        S2L2ABands,
+        S3OLCIBands,
+        SARThorBands,
+        S3SLSTRBands,
+    )
 except Exception:  # pragma: no cover - optional bands
     S2L2ABands = None
     S3OLCIBands = None

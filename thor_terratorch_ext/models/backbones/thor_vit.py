@@ -4,6 +4,7 @@ from copy import deepcopy
 from functools import partial
 from pathlib import Path
 from typing import Any, Iterable, Literal
+from collections.abc import Sequence
 
 import numpy as np
 import torch
@@ -11,7 +12,6 @@ import torch.nn.functional as F  # noqa: N812
 import yaml
 from huggingface_hub import hf_hub_download
 from numpy.typing import NDArray
-from terratorch.datasets import HLSBands, OpticalBands, SARBands
 from terratorch.registry import TERRATORCH_BACKBONE_REGISTRY
 from thor.core.model_registry import MODELS
 from torch import nn
@@ -22,6 +22,7 @@ from thor_terratorch_ext.datasets.utils import (
     S3SLSTRBands,
     SARThorBands,
     ThorModalities,
+    MODALITY_BAND_MAPPING,
 )
 
 logger = logging.getLogger(__name__)
@@ -259,6 +260,7 @@ THOR_NORMALIZATION_PARAMS = {
 ###########################################################################################
 
 
+# Mapping from terratorch band names to thor model band names
 lookup_band = {
     # Optical bands
     "COASTAL_AEROSOL": "S2:CoastAerosal",
@@ -322,6 +324,7 @@ lookup_band = {
     "S9_BT_IN": "S3:S9_BT_in",
 }
 
+
 ###################################################################################
 
 
@@ -354,7 +357,7 @@ pretrained_weights = {
 
 def normalise_for_thor(
     arr: NDArray,
-    band_keys: list[str | S2L2ABands | SARThorBands | S3SLSTRBands | S3OLCIBands],
+    band_keys: Sequence[str | S2L2ABands | SARThorBands | S3SLSTRBands | S3OLCIBands],
 ) -> NDArray:
     """Normalise a (C, H, W) array using THOR pretraining statistics.
     Useful for running inference on single scenes where you don't have the dataset level statistics to do a more accurate normalisation.
@@ -374,11 +377,13 @@ def normalise_for_thor(
         Normalised array, same shape as *arr*.
     """
 
-    band_keys: list[str] = [k.value if not isinstance(k, str) else k for k in band_keys]
-    band_keys = [lookup_band.get(k, k) for k in band_keys]
+    band_keys_normalized: list[str] = [
+        k.value if not isinstance(k, str) else k for k in band_keys
+    ]
+    band_keys_normalized = [lookup_band.get(k, k) for k in band_keys_normalized]
 
     out = arr.copy()
-    for i, key in enumerate(band_keys):
+    for i, key in enumerate(band_keys_normalized):
         m = THOR_NORMALIZATION_PARAMS[key]["mean"]
         s = THOR_NORMALIZATION_PARAMS[key]["std"]
         out[i] = (np.nan_to_num(arr[i], nan=m) - m) / s
@@ -386,12 +391,12 @@ def normalise_for_thor(
 
 
 def process_thor_bands(
-    bands: list[S2L2ABands | SARThorBands | S3OLCIBands | S3SLSTRBands | str],
+    bands: Sequence[S2L2ABands | SARThorBands | S3OLCIBands | S3SLSTRBands | str],
 ) -> tuple[list[str], dict[str, dict[str, Any]]]:
     """
     Process a list of bands and map them to THOR band names. For SAR bands, handle GSD suffixes and update channel parameters accordingly.
     Args:
-        bands (list[S2L2ABands | SARThorBands | S3OLCIBands | S3SLSTRBands | str]): List of bands to process.
+        bands (Sequence[S2L2ABands | SARThorBands | S3OLCIBands | S3SLSTRBands | str]): List of bands to process.
     Returns:
         tuple[list[str], dict[str, dict[str, Any]]]: A tuple containing the list of THOR band names and the updated channel parameters.
     Raises:
@@ -541,20 +546,62 @@ class THOREncoderWrapper(nn.Module):
             )
         return [self.single_embedding_shape] * len(self.out_indices)
 
-    def _preprocess_input(self, x):
-        x = {
-            channel: F.interpolate(
-                x[:, [band_index], :, :],
-                (
-                    int(self.ground_cover / self.channels[channel]["GSD"]),
-                    int(self.ground_cover / self.channels[channel]["GSD"]),
-                ),
-                mode="bilinear",
-            )
-            for band_index, channel in zip(self.band_index, self.bands, strict=False)
-        }
+    def _preprocess_input(
+        self, x: torch.Tensor | dict[str, torch.Tensor]
+    ) -> dict[str, torch.Tensor]:
+        if isinstance(x, dict):
+            result: dict[str, torch.Tensor] = {}
+            for modality_str, tensor in x.items():
+                try:
+                    modality = ThorModalities(modality_str)
+                except ValueError as e:
+                    raise ValueError(
+                        f"Invalid modality key '{modality_str}' in input dict. Expected one of {[m.value for m in ThorModalities]}."
+                    ) from e
 
-        return x
+                for ch_idx, band_name in enumerate(MODALITY_BAND_MAPPING[modality]):
+                    internal_band_name = lookup_band.get(band_name.value)
+                    if internal_band_name not in self.bands:
+                        continue
+                    if ch_idx >= tensor.shape[1]:
+                        raise ValueError(
+                            f"Modality '{modality}': expected at least {ch_idx + 1} channels for band '{band_name}' but tensor only has {tensor.shape[1]} channels."
+                        )
+                    result[internal_band_name] = F.interpolate(
+                        tensor[:, [ch_idx], :, :],
+                        (
+                            int(
+                                self.ground_cover
+                                / self.channels[internal_band_name]["GSD"]
+                            ),
+                            int(
+                                self.ground_cover
+                                / self.channels[internal_band_name]["GSD"]
+                            ),
+                        ),
+                        mode="bilinear",
+                    )
+            if not result:
+                raise ValueError(
+                    "No valid bands found in modality dict input. "
+                    f"Received modalities: {list(x)}, "
+                    f"model bands: {self.bands}."
+                )
+            return result
+        else:
+            return {
+                channel: F.interpolate(
+                    x[:, [band_index], :, :],
+                    (
+                        int(self.ground_cover / self.channels[channel]["GSD"]),
+                        int(self.ground_cover / self.channels[channel]["GSD"]),
+                    ),
+                    mode="bilinear",
+                )
+                for band_index, channel in zip(
+                    self.band_index, self.bands, strict=False
+                )
+            }
 
     def _merge_tokens_to_image_features(
         self,
@@ -654,9 +701,77 @@ class THOREncoderWrapper(nn.Module):
         pass
 
 
+def bands_from_modalities(
+    modalities: list[ThorModalities | str]
+    | dict[
+        ThorModalities | str,
+        Sequence[S2L2ABands | SARThorBands | S3OLCIBands | S3SLSTRBands],
+    ],
+) -> Sequence[S2L2ABands | SARThorBands | S3OLCIBands | S3SLSTRBands]:
+    """Convert a modalities specification to a flat list of band names.
+
+    Args:
+        modalities: Either a list of modality keys (use all bands for each) or
+            a dict mapping each modality key to a subset of its bands.  Modality
+            keys are ``ThorModalities`` enum members or equivalent strings.
+            Per-modality band lists follow the same format as ``model_bands``
+            (band enum values or their ``.value`` strings).
+
+    Returns:
+        List of THOR band names (e.g. ``"IW_VV"``)
+        in the order they were encountered.
+    """
+    seen: set[S2L2ABands | SARThorBands | S3OLCIBands | S3SLSTRBands] = set()
+    bands: list[S2L2ABands | SARThorBands | S3OLCIBands | S3SLSTRBands] = []
+
+    if isinstance(modalities, list):
+        for modality in modalities:
+            if isinstance(modality, str):
+                try:
+                    modality = ThorModalities(modality)
+                except ValueError as e:
+                    raise ValueError(
+                        f"Invalid modality '{modality}' in modalities list. Expected one of {[m.value for m in ThorModalities]}."
+                    ) from e
+            for band in MODALITY_BAND_MAPPING[modality]:
+                if band not in seen:
+                    bands.append(band)
+                    seen.add(band)
+    else:
+        for modality, subset in modalities.items():
+            if isinstance(modality, str):
+                try:
+                    modality = ThorModalities(modality)
+                except ValueError as e:
+                    raise ValueError(
+                        f"Invalid modality '{modality}' in modalities dict. Expected one of {[m.value for m in ThorModalities]}."
+                    ) from e
+            for band in MODALITY_BAND_MAPPING[modality]:
+                if band not in seen:
+                    bands.append(band)
+                    seen.add(band)
+            available = set(MODALITY_BAND_MAPPING[modality])
+            for band in subset:
+                if band not in available:
+                    raise ValueError(
+                        f"Band '{band}' is not part of modality '{modality.value}'. Available: {list(available)}."
+                    )
+                if band not in seen:
+                    bands.append(band)
+                    seen.add(band)
+
+    return bands
+
+
 def load_thor_model(
     model_name: str,
-    model_bands: list[S2L2ABands | SARThorBands | S3OLCIBands | S3SLSTRBands]
+    model_bands: Sequence[S2L2ABands | SARThorBands | S3OLCIBands | S3SLSTRBands]
+    | None = None,
+    modalities: list[ThorModalities | str]
+    | dict[
+        ThorModalities | str,
+        Sequence[S2L2ABands | SARThorBands | S3OLCIBands | S3SLSTRBands],
+    ]
     | None = None,
     out_indices: list[int] | None = None,
     pretrained: bool = True,
@@ -669,27 +784,36 @@ def load_thor_model(
         )
         logger.debug(f"Mapped model name to full THOR model name: {model_name}")
 
-    if model_bands is None:
-        logger.info("Model bands not provided, using HLS and SAR bands by default")
-        model_bands = [
-            HLSBands.COASTAL_AEROSOL,
-            HLSBands.BLUE,
-            HLSBands.GREEN,
-            HLSBands.RED,
-            HLSBands.NIR_BROAD,
-            HLSBands.RED_EDGE_1,
-            HLSBands.RED_EDGE_2,
-            HLSBands.RED_EDGE_3,
-            HLSBands.NIR_NARROW,
-            HLSBands.SWIR_1,
-            HLSBands.SWIR_2,
-            HLSBands.WATER_VAPOR,
-            SARBands.VV,
-            SARBands.VH,
-        ]
+    if model_bands is not None and modalities is not None:
+        raise ValueError("Specify either 'model_bands' or 'modalities', not both.")
 
-    # Map to THOR bands names and get updated channel params if necessary
-    bands, channel_params_updated = process_thor_bands(model_bands)
+    if modalities is not None:
+        logger.info(f"Deriving model bands from modalities: {modalities}")
+        modality_bands = bands_from_modalities(modalities)
+        bands, channel_params_updated = process_thor_bands(modality_bands)
+    else:
+        if model_bands is None:
+            logger.info(
+                "Model bands not provided, using S2L2A and SAR bands by default"
+            )
+            model_bands = [
+                S2L2ABands.COASTAL_AEROSOL,
+                S2L2ABands.BLUE,
+                S2L2ABands.GREEN,
+                S2L2ABands.RED,
+                S2L2ABands.NIR_BROAD,
+                S2L2ABands.RED_EDGE_1,
+                S2L2ABands.RED_EDGE_2,
+                S2L2ABands.RED_EDGE_3,
+                S2L2ABands.NIR_NARROW,
+                S2L2ABands.WATER_VAPOR,
+                S2L2ABands.SWIR_1,
+                S2L2ABands.SWIR_2,
+                SARThorBands.IW_VV,
+                SARThorBands.IW_VH,
+            ]
+        # Map to THOR band names and get updated channel params if necessary
+        bands, channel_params_updated = process_thor_bands(model_bands)
     logger.debug(f"bands mapped to thor: {bands}")
 
     config = kwargs.pop("config", None)
