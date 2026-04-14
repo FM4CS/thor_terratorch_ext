@@ -6,6 +6,7 @@ properties (e.g. wrapper.single_embedding_shape) so they remain correct even
 if the architecture changes.
 """
 
+import numpy as np
 import pytest
 import torch
 
@@ -258,6 +259,14 @@ class TestBandsFromModalitiesDictForm:
     def test_string_modality_key(self):
         result = bands_from_modalities({"S1GRD": [SARThorBands.IW_VV]})
         assert list(result) == [SARThorBands.IW_VV]
+
+    def test_string_subset_values_are_accepted(self):
+        result = bands_from_modalities({"S2L2A": ["RED", "GREEN", "BLUE"]})
+        assert list(result) == [
+            S2L2ABands.RED,
+            S2L2ABands.GREEN,
+            S2L2ABands.BLUE,
+        ]
 
 
 # ---------------------------------------------------------------------------

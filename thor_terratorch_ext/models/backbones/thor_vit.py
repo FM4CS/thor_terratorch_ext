@@ -233,8 +233,8 @@ THOR_NORMALIZATION_PARAMS = {
     "S1:EW-VH": {"mean": -23.5719, "std": 6.8895},
     "S1:EW-VV": {"mean": -13.9046, "std": 6.3085},
     # S1-EW-HH (10m) #################
-    "S1:EW-HH": {"mean": -12.1138, "std": 6.5830},
-    "S1:EW-HV": {"mean": -21.7450, "std": 7.4658},
+    "S1:EW-HH": {"mean": -12.7691, "std": 6.6416},
+    "S1:EW-HV": {"mean": -22.6922, "std": 7.2472},
     # S3-250m #################
     "S3:Oa01_reflectance": {"mean": 0.418360, "std": 0.271155},
     "S3:Oa02_reflectance": {"mean": 0.407687, "std": 0.276213},
@@ -842,15 +842,18 @@ def bands_from_modalities(
                     raise ValueError(
                         f"Invalid modality '{modality}' in modalities dict. Expected one of {[m.value for m in ThorModalities]}."
                     ) from e
-            available = set(MODALITY_BAND_MAPPING[modality])
+            available_bands = MODALITY_BAND_MAPPING[modality]
+            available = set(available_bands)
+            by_value = {band.value: band for band in available_bands}
             for band in subset:
-                if band not in available:
+                normalized_band = by_value.get(band, band) if isinstance(band, str) else band
+                if normalized_band not in available:
                     raise ValueError(
                         f"Band '{band}' is not part of modality '{modality.value}'. Available: {list(available)}."
                     )
-                if band not in seen:
-                    bands.append(band)
-                    seen.add(band)
+                if normalized_band not in seen:
+                    bands.append(normalized_band)
+                    seen.add(normalized_band)
 
     return bands
 

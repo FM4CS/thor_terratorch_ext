@@ -149,10 +149,8 @@ model:
       backbone_pretrained: true
       backbone: thor_v1_base
       backbone_merge_method: concat
-      backbone_input_params:
-        ground_covers: [2880]
-        flexivit_patch_size_seqs:
-          - 8
+      backbone_ground_cover: 2880
+      backbone_patch_sizes: 8
       backbone_out_indices: [-1]
       backbone_model_bands:
         # - COASTAL_AEROSOL

@@ -90,10 +90,8 @@ model:
         - SWIR_1
         - SWIR_2
       backbone_merge_method: concat
-      backbone_input_params:
-        ground_covers: [2880]
-        flexivit_patch_size_seqs:
-          - 8
+      backbone_ground_cover: 2880
+      backbone_patch_sizes: 8
       backbone_out_indices: [-1]
     output_format: tiff
     output_dir: "output/embeddings_thor"

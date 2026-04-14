@@ -59,14 +59,32 @@ model = BACKBONE_REGISTRY.build(
     "thor_v1_base",
     pretrained=True,
     model_bands=["BLUE", "GREEN", "RED", "VV", "VH"],
-    input_params=dict(  # Optional input parameters to customize
-        ground_covers=[
-            2880
-        ],  # Ground cover in meters (typically input image size [px] * input image resolution)
-        flexivit_patch_size_seqs=[8],  # Patch size in pixels
-    ),
+    ground_cover=2880,  # Ground cover in meters (typically input image size [px] * input image resolution)
+    patch_sizes=8,  # Patch size in pixels
 )
 ```
+
+### THOR backbone parameters
+
+The THOR backbone accepts the following kwargs 
+
+| Parameter | Description | Example |
+|-----------|-------------|---------|
+| `ground_cover` | Spatial extent (in metres) of the crop fed to the ViT | `2880` |
+| `patch_sizes` | FlexiViT patch size(s) to use. Accepts a single int, a list of ints, or a per-modality or per-band dict | `8`, `[8, 16]`, `{S2L2A: 8, S1GRD: 16}` |
+| `ref_patch_size` | Reference patch size for the FlexiViT patch embeddings (optional) | `4` |
+
+Example usage in a TerraTorch config:
+
+```yaml
+model_args:
+  backbone: thor_v1_base
+  backbone_ground_cover: 2880
+  backbone_patch_sizes: 8
+  backbone_merge_method: concat
+  backbone_pretrained: true
+```
+
 
 ## Attribution
 
