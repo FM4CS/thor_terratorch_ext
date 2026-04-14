@@ -223,6 +223,18 @@ THOR_NORMALIZATION_PARAMS = {
     # S1-EW-HH-10m #################
     "S1:EW-HH_10": {"mean": -12.7691, "std": 6.6416},
     "S1:EW-HV_10": {"mean": -22.6922, "std": 7.2472},
+    # S1-IW-VV (10m) #################
+    "S1:IW-VH": {"mean": -20.6958, "std": 5.8688},
+    "S1:IW-VV": {"mean": -12.9850, "std": 5.0062},
+    # S1-IW-HH (10m) #################
+    "S1:IW-HH": {"mean": -13.9485, "std": 6.8015},
+    "S1:IW-HV": {"mean": -22.4575, "std": 6.9106},
+    # S1-EW-VV (10m) #################
+    "S1:EW-VH": {"mean": -23.5719, "std": 6.8895},
+    "S1:EW-VV": {"mean": -13.9046, "std": 6.3085},
+    # S1-EW-HH (10m) #################
+    "S1:EW-HH": {"mean": -12.1138, "std": 6.5830},
+    "S1:EW-HV": {"mean": -21.7450, "std": 7.4658},
     # S3-250m #################
     "S3:Oa01_reflectance": {"mean": 0.418360, "std": 0.271155},
     "S3:Oa02_reflectance": {"mean": 0.407687, "std": 0.276213},
@@ -325,6 +337,110 @@ lookup_band = {
 }
 
 
+_ALL_INTERNAL_NAMES: set[str] = set(_default_input_params["channels"].keys())
+
+
+def _to_internal_band_name(name: str) -> str:
+    """Map a single band name to its internal THOR name.
+
+    Accepts band enum values (e.g. ``"BLUE"``, ``"IW_VV"``), or internal names already
+    (e.g. ``"S2:Blue"``).
+
+    Raises ``ValueError`` if the name cannot be resolved.
+    """
+    if name in lookup_band:
+        return lookup_band[name]
+    if name in _ALL_INTERNAL_NAMES:
+        return name
+    msg = f"Cannot resolve '{name}' to an internal THOR band name."
+    raise ValueError(msg)
+
+
+def _resolve_band_key(key: str) -> list[str]:
+    """Resolve a user-facing key to a list of internal THOR band names.
+
+    The *key* may be:
+    - A ``ThorModalities`` value (e.g. ``"S2L2A"``, ``"S1GRD"``): this will be
+        expanded to all bands in that modality (e.g. all S2L2A bands,
+        or all SAR bands for the SAR modalities).
+    - A band enum value, alias, or internal name
+
+    Returns a list of **internal** band names (``"S2:Blue"`` style).
+    """
+    # 1) Try as a modality key (may expand to many bands)
+    try:
+        modality = ThorModalities(key)
+        if modality.value in {
+            ThorModalities.S1GRD.value,
+            ThorModalities.S1GRD_VV_VH.value,
+            ThorModalities.S1GRD_HH_HV.value,
+        }:
+            # All internal SAR band names (IW + EW, all polarisations)
+            return [lookup_band[b.value] for b in SARThorBands]
+        return [
+            _to_internal_band_name(b.value) for b in MODALITY_BAND_MAPPING[modality]
+        ]
+    except ValueError:
+        pass
+
+    # 2) Try as a single band name / alias / internal name
+    try:
+        return [_to_internal_band_name(key)]
+    except ValueError:
+        pass
+
+    msg = (
+        f"Cannot resolve patch_sizes key '{key}' to any THOR band or modality. "
+        f"Valid modality keys: {[m.value for m in ThorModalities]}. "
+        f"Valid band names: see S2L2ABands, SARThorBands, S3OLCIBands, S3SLSTRBands enums or internal names like 'S2:Blue'."
+    )
+    raise ValueError(msg)
+
+
+def _normalize_patch_sizes(
+    patch_sizes: int | list[int] | dict[str, int | list[int]],
+) -> list[int] | dict[str, list[int]]:
+    """Normalise ``patch_sizes`` into the format expected by THOR internals.
+
+    Accepted forms
+    --------------
+    * ``int`` : single patch size applied globally.
+    * ``list[int]`` : list of candidate patch sizes applied globally.
+    * ``dict[str, int | list[int]]`` : per-key specification.  Keys may be
+      ``ThorModalities`` values, band enum values, or internal THOR band
+      names.  Each key is expanded/normalised to internal band names.
+
+    Returns
+    -------
+    ``list[int]`` when the input is uniform (int or list), or
+    ``dict[str, list[int]]`` keyed by **internal** THOR band names.
+    """
+    if isinstance(patch_sizes, int):
+        return [patch_sizes]
+
+    if isinstance(patch_sizes, list):
+        return patch_sizes
+
+    if isinstance(patch_sizes, dict):
+        expanded: dict[str, list[int]] = {}
+        for key, value in patch_sizes.items():
+            sizes = [value] if isinstance(value, int) else list(value)
+            for internal_name in _resolve_band_key(key):
+                if internal_name in expanded:
+                    logger.warning(
+                        f"patch_sizes: key '{key}' resolved to '{internal_name}' "
+                        f"which was already set; overwriting."
+                    )
+                expanded[internal_name] = sizes
+        return expanded
+
+    msg = (
+        f"patch_sizes must be int, list[int], or dict[str, int | list[int]], "
+        f"got {type(patch_sizes).__name__}"
+    )
+    raise TypeError(msg)
+
+
 ###################################################################################
 
 
@@ -415,7 +531,7 @@ def process_thor_bands(
                 (part in band.split("_") for part in ["VV", "VH", "HH", "HV"])
             ):
                 band = "_".join(band.split("_")[:-1])
-                thor_band = lookup_band[band]
+                thor_band = _to_internal_band_name(band)
                 logger.info(
                     f"Detected GSD suffix: {gsd_str} for band: {band}, mapped to THOR band: {thor_band}"
                 )
@@ -450,10 +566,10 @@ def process_thor_bands(
 
                 thor_bands.append(thor_band)
             else:
-                thor_band = lookup_band[band]
+                thor_band = _to_internal_band_name(band)
                 thor_bands.append(thor_band)
 
-        except KeyError:
+        except ValueError:
             msg = f"This band is not implemented in THOR: {band}"
             raise NotImplementedError(msg)
 
@@ -799,9 +915,23 @@ def load_thor_model(
     ckpt_path = kwargs.pop(
         "ckpt", None
     )  # path to checkpoint to load, will override config if provided
-    input_params = kwargs.pop(
-        "input_params", {}
-    )  # dict with input params to override config if provided
+
+    # ---- new top-level kwargs --------------------------------
+    ground_cover = kwargs.pop("ground_cover", None)
+    patch_sizes = kwargs.pop("patch_sizes", None)
+    ref_patch_size = kwargs.pop("ref_patch_size", None)
+    select_patch_strategy = kwargs.pop("select_patch_strategy", None)
+
+    # ---- deprecated input_params dict ----------------------------------------
+    input_params = kwargs.pop("input_params", {})
+    if input_params:
+        warnings.warn(
+            "Passing 'input_params' is deprecated. Use the top-level kwargs "
+            "'ground_cover', 'patch_sizes', 'ref_patch_size', and "
+            "'select_patch_strategy' instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
     return_channel_params = kwargs.pop("return_channel_params", False)
     merge_method = kwargs.pop("merge_method", None)
@@ -849,6 +979,7 @@ def load_thor_model(
             )
         model_config["ckpt"] = ckpt_path
 
+    # ---- apply deprecated input_params (lowest priority) ---------------------
     if input_params:
         _ensure_allowed_input_params(input_params.keys())
         for k, v in input_params.items():
@@ -862,6 +993,20 @@ def load_thor_model(
                     f"Setting input param {k} for model {model_checkpoint_key} to {v}"
                 )
             model_config["input_params"][k] = v
+
+    # ---- apply new top-level kwargs (highest priority) -----------------------
+    if ground_cover is not None:
+        if isinstance(ground_cover, (int, float)):
+            ground_cover = [int(ground_cover)]
+        model_config["input_params"]["ground_covers"] = ground_cover
+    if patch_sizes is not None:
+        model_config["input_params"]["flexivit_patch_size_seqs"] = (
+            _normalize_patch_sizes(patch_sizes)
+        )
+    if ref_patch_size is not None:
+        model_config["input_params"]["flexivit_ref_patch_size"] = ref_patch_size
+    if select_patch_strategy is not None:
+        model_config["input_params"]["select_patch_strategy"] = select_patch_strategy
 
     if pretrained and model_config["ckpt"] is None:
         logger.info(f"Using pretrained weights for model {model_checkpoint_key}")
