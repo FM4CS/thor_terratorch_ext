@@ -653,8 +653,9 @@ class THOREncoderWrapper(nn.Module):
         if isinstance(x, dict):
             result: dict[str, torch.Tensor] = {}
             for modality_str, tensor in x.items():
+                base_modality_str, _ = _parse_modality_gsd(modality_str)
                 try:
-                    modality = ThorModalities(modality_str)
+                    modality = ThorModalities(base_modality_str)
                 except ValueError as e:
                     raise ValueError(
                         f"Invalid modality key '{modality_str}' in input dict. Expected one of {[m.value for m in ThorModalities]}."
@@ -797,13 +798,24 @@ class THOREncoderWrapper(nn.Module):
         pass
 
 
+def _parse_modality_gsd(modality_str: str) -> tuple[str, int | None]:
+    """Strip an optional numeric GSD suffix from a modality string.
+
+    E.g. ``"S1GRD_240"`` → ``("S1GRD", 240)``, ``"S2L2A"`` → ``("S2L2A", None)``.
+    """
+    base, _, suffix = modality_str.rpartition("_")
+    if base and suffix.isdigit():
+        return base, int(suffix)
+    return modality_str, None
+
+
 def bands_from_modalities(
     modalities: list[ThorModalities | str]
     | dict[
         ThorModalities | str,
         Sequence[S2L2ABands | SARThorBands | S3OLCIBands | S3SLSTRBands],
     ],
-) -> Sequence[S2L2ABands | SARThorBands | S3OLCIBands | S3SLSTRBands]:
+) -> Sequence[S2L2ABands | SARThorBands | S3OLCIBands | S3SLSTRBands | str]:
     """Convert a modalities specification to a flat list of band names.
 
     Args:
@@ -822,7 +834,9 @@ def bands_from_modalities(
 
     if isinstance(modalities, list):
         for modality in modalities:
+            gsd: int | None = None
             if isinstance(modality, str):
+                modality, gsd = _parse_modality_gsd(modality)
                 try:
                     modality = ThorModalities(modality)
                 except ValueError as e:
@@ -831,11 +845,13 @@ def bands_from_modalities(
                     ) from e
             for band in MODALITY_BAND_MAPPING[modality]:
                 if band not in seen:
-                    bands.append(band)
+                    # Append band with GSD suffix so process_thor_bands() applies the override
+                    bands.append(f"{band.value}_{gsd}" if gsd is not None else band)
                     seen.add(band)
     else:
         for modality, subset in modalities.items():
             if isinstance(modality, str):
+                modality, _ = _parse_modality_gsd(modality)
                 try:
                     modality = ThorModalities(modality)
                 except ValueError as e:
