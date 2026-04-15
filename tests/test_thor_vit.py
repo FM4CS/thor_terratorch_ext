@@ -270,6 +270,83 @@ class TestBandsFromModalitiesDictForm:
 
 
 # ---------------------------------------------------------------------------
+# _parse_modality_gsd
+# ---------------------------------------------------------------------------
+
+
+class TestParseModalityGsd:
+    def test_s1grd_with_gsd(self):
+        assert _parse_modality_gsd("S1GRD_240") == ("S1GRD", 240)
+
+    def test_s1grd_vv_vh_with_gsd(self):
+        assert _parse_modality_gsd("S1GRD_VV_VH_240") == ("S1GRD_VV_VH", 240)
+
+    def test_s1grd_hh_hv_with_gsd(self):
+        assert _parse_modality_gsd("S1GRD_HH_HV_240") == ("S1GRD_HH_HV", 240)
+
+    def test_no_suffix_returns_none(self):
+        assert _parse_modality_gsd("S1GRD") == ("S1GRD", None)
+        assert _parse_modality_gsd("S2L2A") == ("S2L2A", None)
+
+    def test_non_numeric_suffix_is_not_stripped(self):
+        # "S1GRD_VV_VH" — last segment "VH" is not numeric
+        base, gsd = _parse_modality_gsd("S1GRD_VV_VH")
+        assert gsd is None
+        assert base == "S1GRD_VV_VH"
+
+    def test_gsd_is_integer(self):
+        _, gsd = _parse_modality_gsd("S1GRD_60")
+        assert isinstance(gsd, int)
+        assert gsd == 60
+
+
+# ---------------------------------------------------------------------------
+# bands_from_modalities — GSD suffix support
+# ---------------------------------------------------------------------------
+
+
+class TestBandsFromModalitiesGsdSuffix:
+    def test_s1grd_gsd_returns_suffixed_band_strings(self):
+        result = bands_from_modalities(["S1GRD_240"])
+        assert result == ["IW_VV_240", "IW_VH_240"]
+
+    def test_s1grd_vv_vh_gsd(self):
+        result = bands_from_modalities(["S1GRD_VV_VH_240"])
+        assert result == ["IW_VV_240", "IW_VH_240"]
+
+    def test_s1grd_hh_hv_gsd(self):
+        result = bands_from_modalities(["S1GRD_HH_HV_240"])
+        assert result == ["IW_HH_240", "IW_HV_240"]
+
+    def test_gsd_suffix_feeds_process_thor_bands_correctly(self):
+        """Suffixed strings from bands_from_modalities must yield correct GSD via process_thor_bands."""
+        modality_bands = bands_from_modalities(["S1GRD_240"])
+        thor_bands, channel_params = process_thor_bands(modality_bands)
+        vv_key, vh_key = thor_bands[0], thor_bands[1]
+        assert channel_params[vv_key]["GSD"] == 240
+        assert channel_params[vh_key]["GSD"] == 240
+
+    def test_mixed_modalities_only_s1_gets_gsd(self):
+        """S2L2A (no suffix) should keep default GSD; S1GRD_240 should get 240."""
+        modality_bands = bands_from_modalities(["S2L2A", "S1GRD_240"])
+        thor_bands, channel_params = process_thor_bands(modality_bands)
+        vv_key = next(b for b in thor_bands if "IW-VV" in b)
+        blue_key = next(b for b in thor_bands if "Blue" in b)
+        assert channel_params[vv_key]["GSD"] == 240
+        assert channel_params[blue_key]["GSD"] == 10  # S2 10m default
+
+    def test_no_suffix_still_returns_band_enums(self):
+        """Without GSD suffix the list form should still return band enum objects."""
+        result = bands_from_modalities(["S1GRD"])
+        assert all(isinstance(b, SARThorBands) for b in result)
+
+    def test_deduplication_with_gsd_suffix(self):
+        """S1GRD_240 and S1GRD_VV_VH_240 cover the same bands — no duplicates."""
+        result = bands_from_modalities(["S1GRD_240", "S1GRD_VV_VH_240"])
+        assert len(result) == 2  # IW_VV_240, IW_VH_240 deduplicated
+
+
+# ---------------------------------------------------------------------------
 # THOREncoderWrapper — __init__ and properties  (uses real THOR tiny model)
 # ---------------------------------------------------------------------------
 
@@ -413,6 +490,20 @@ class TestPreprocessInput:
         # S1GRD expects ch0=VV, ch1=VH; provide only 1 channel
         with pytest.raises(ValueError, match="channels"):
             wrapper._preprocess_input({"S1GRD": torch.zeros(2, 1, 16, 16)})
+
+    def test_dict_input_s1grd_gsd_suffix_accepted(self):
+        """{"S1GRD_240": tensor} must be handled identically to {"S1GRD": tensor}."""
+        wrapper = _make_wrapper("s1")
+        result = wrapper._preprocess_input({"S1GRD_240": torch.zeros(2, 2, 16, 16)})
+        assert set(result.keys()) == {"S1:IW-VV", "S1:IW-VH"}
+
+    def test_dict_input_gsd_suffix_does_not_change_interpolation_size(self):
+        """The GSD suffix on the dict key should not affect the interpolated size
+        (it was already set during model construction via process_thor_bands)."""
+        wrapper = _make_wrapper("s1")
+        plain = wrapper._preprocess_input({"S1GRD": torch.zeros(2, 2, 16, 16)})
+        suffixed = wrapper._preprocess_input({"S1GRD_240": torch.zeros(2, 2, 16, 16)})
+        assert plain["S1:IW-VV"].shape == suffixed["S1:IW-VV"].shape
 
 
 # ---------------------------------------------------------------------------
@@ -693,3 +784,61 @@ class TestLoadThorModelNewKwargs:
                 ground_cover=1000,
             )
         assert wrapper.ground_cover == 1000
+
+
+# ---------------------------------------------------------------------------
+# load_thor_model — GSD suffix on modality strings (end-to-end)
+# ---------------------------------------------------------------------------
+
+
+class TestModalityGsdSuffixEndToEnd:
+    def test_s1grd_240_sets_channel_gsd(self):
+        wrapper = load_thor_model(
+            "thor_v1_tiny",
+            modalities=["S1GRD_240"],
+            pretrained=False,
+        )
+        assert wrapper.channels["S1:IW-VV"]["GSD"] == 240
+        assert wrapper.channels["S1:IW-VH"]["GSD"] == 240
+
+    def test_s1grd_hh_hv_240_sets_channel_gsd(self):
+        wrapper = load_thor_model(
+            "thor_v1_tiny",
+            modalities=["S1GRD_HH_HV_240"],
+            pretrained=False,
+        )
+        assert wrapper.channels["S1:IW-HH"]["GSD"] == 240
+        assert wrapper.channels["S1:IW-HV"]["GSD"] == 240
+
+    def test_s1grd_no_suffix_keeps_default_gsd(self):
+        wrapper = load_thor_model(
+            "thor_v1_tiny",
+            modalities=["S1GRD"],
+            pretrained=False,
+        )
+        assert wrapper.channels["S1:IW-VV"]["GSD"] == 10
+
+    def test_forward_with_tensor_input(self):
+        wrapper = load_thor_model(
+            "thor_v1_tiny",
+            modalities=["S1GRD_240"],
+            pretrained=False,
+            ground_cover=2880,
+            patch_sizes=8,
+        )
+        x = torch.randn(1, 2, 12, 12)
+        out = wrapper(x)
+        assert len(out) == len(wrapper.out_indices)
+        assert all(isinstance(o, torch.Tensor) for o in out)
+
+    def test_forward_with_gsd_suffixed_dict_input(self):
+        wrapper = load_thor_model(
+            "thor_v1_tiny",
+            modalities=["S1GRD_240"],
+            pretrained=False,
+            ground_cover=2880,
+            patch_sizes=8,
+        )
+        x = {"S1GRD_240": torch.randn(1, 2, 12, 12)}
+        out = wrapper(x)
+        assert len(out) == len(wrapper.out_indices)
