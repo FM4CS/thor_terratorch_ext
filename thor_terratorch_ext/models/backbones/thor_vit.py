@@ -1047,13 +1047,31 @@ def load_thor_model(
         model_checkpoint_key
     ]
 
-    return THOREncoderWrapper(
+    wrapper = THOREncoderWrapper(
         model=model,
         bands=bands,
         out_indices=out_indices,
         return_channel_params=return_channel_params,
         merge_method=merge_method,
     )
+
+    # BitFit / partial unfreezing
+    unfreeze_blocks = kwargs.pop("unfreeze_blocks", None)
+    unfreeze_bias = kwargs.pop("unfreeze_bias", False)
+
+    if unfreeze_blocks is not None or unfreeze_bias:
+        for param in wrapper.parameters():
+            param.requires_grad_(False)
+        if unfreeze_blocks is not None:
+            for name, param in wrapper.named_parameters():
+                if any(f"blocks.{i}" in name for i in unfreeze_blocks):
+                    param.requires_grad_(True)
+        if unfreeze_bias:
+            for name, param in wrapper.named_parameters():
+                if name.endswith(".bias"):
+                    param.requires_grad_(True)
+
+    return wrapper
 
 
 def _partial_with_name(func, /, *args, **keywords):

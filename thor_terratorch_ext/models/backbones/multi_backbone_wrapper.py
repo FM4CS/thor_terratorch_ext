@@ -6,7 +6,7 @@ resulting module can be used like a normal backbone by EncoderDecoderFactory.
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, List
 
 import torch
 import torch.nn.functional as F  # noqa: N812
@@ -33,6 +33,7 @@ import logging
 from terratorch.models.necks import Neck, build_neck_list
 from terratorch.registry import TERRATORCH_BACKBONE_REGISTRY
 
+from lightning.pytorch import Callback, Trainer
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +139,8 @@ class MultiBackboneWrapper(nn.Module):
             backbone_kwargs.update(remaining_kwargs)
 
             freeze_backbone = backbone_kwargs.pop("freeze_backbone", False)
+            unfreeze_blocks = backbone_kwargs.pop("unfreeze_blocks", None)
+            unfreeze_bias = backbone_kwargs.pop("unfreeze_bias", False)
 
             assert not (
                 "model_bands" in backbone_kwargs and "bands" in backbone_kwargs
@@ -182,11 +185,23 @@ class MultiBackboneWrapper(nn.Module):
 
             backbone_modules.append(backbone)
             backbone_necks.append(backbone_neck)
+            
+            logger.info(f"freeze_backbone: {freeze_backbone}")
 
             if freeze_backbone:
                 freeze_module(backbone)
-            logger.info(f"freeze_backbone: {freeze_backbone}")
+                if unfreeze_blocks is not None: 
+                    for name, param in backbone.named_parameters():
+                        if any(f"blocks.{i}" in name for i in unfreeze_blocks):
+                            param.requires_grad_(True)
 
+                    logger.info(f"unfreeze_blocks: {unfreeze_blocks}")
+                if unfreeze_bias:                                          # ← add this
+                    for name, param in backbone.named_parameters():
+                        if name.endswith(".bias"):
+                            param.requires_grad_(True)
+                    logger.info("BitFit: unfreezing all backbone bias terms")
+                        
         self.bands = bands
         self.backbones = nn.ModuleList(backbone_modules)
         self.backbone_bands = backbone_bands
