@@ -12,7 +12,8 @@ import torch.nn.functional as F  # noqa: N812
 import yaml
 from huggingface_hub import hf_hub_download
 from numpy.typing import NDArray
-from terratorch.registry import TERRATORCH_BACKBONE_REGISTRY
+from terratorch.models.necks import Neck
+from terratorch.registry import TERRATORCH_BACKBONE_REGISTRY, TERRATORCH_NECK_REGISTRY
 from thor.core.model_registry import MODELS
 from torch import nn
 
@@ -1083,3 +1084,117 @@ def register_thor_models():
 
 
 register_thor_models()
+
+
+# ---------------------------------------------------------------------------
+# Backward-compatibility neck
+# ---------------------------------------------------------------------------
+# Old checkpoints were saved with THORGroupReshapeTokensToImage as the neck.
+# This class was removed in favour of merge_method inside THOREncoderWrapper.
+# New code should use merge_method instead.
+# ---------------------------------------------------------------------------
+
+
+@TERRATORCH_NECK_REGISTRY.register
+class THORGroupReshapeTokensToImage(Neck):
+    """Backward-compatibility neck: reshape THOR token sequences to 2-D feature maps.
+
+    Kept only so that checkpoints trained with this neck can still be loaded.
+    For new models use ``merge_method`` in :func:`load_thor_model` /
+    :class:`THOREncoderWrapper` instead.
+    """
+
+    def __init__(
+        self,
+        channel_list: list[int],
+        merge: Literal["concat", "sum", "mean"] = "concat",
+        remove_cls_token: bool = False,
+    ):
+        warnings.warn(
+            "THORGroupReshapeTokensToImage is deprecated and kept only for "
+            "checkpoint backward compatibility. Use merge_method in "
+            "load_thor_model / THOREncoderWrapper instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        super().__init__(channel_list)
+        assert all(c == channel_list[0] for c in channel_list), (
+            "All input channels must have the same embedding size."
+        )
+        self.single_embedding_shape = channel_list[0]
+        # Use all default groups; inactive ones are skipped in forward().
+        self.groups = dict(_DEFAULT_GROUPS)
+        assert merge in ("concat", "sum", "mean"), (
+            "merge must be 'concat', 'sum', or 'mean'."
+        )
+        self.merge = merge
+        self.remove_cls_token = remove_cls_token
+        self.highest_num_patch: int | None = None
+
+    def forward(
+        self,
+        features: list[torch.Tensor] | tuple[list[torch.Tensor], dict],
+        **kwargs,
+    ) -> list[torch.Tensor]:  # ty:ignore[invalid-method-override]
+        # Already-merged 4-D feature maps — pass through unchanged.
+        if (
+            isinstance(features, list)
+            and features
+            and isinstance(features[0], torch.Tensor)
+            and features[0].dim() == 4
+        ):
+            return features
+
+        if not isinstance(features, tuple):
+            raise ValueError(
+                "THORGroupReshapeTokensToImage requires channel_params to be passed "
+                "during forward. Set return_channel_params=True in THOREncoderWrapper."
+            )
+
+        features, channel_params = features
+        self.highest_num_patch = max(p["num_patch"] for p in channel_params.values())
+
+        out_features = []
+        for feature in features:
+            x = feature[:, 1:] if self.remove_cls_token else feature
+
+            start_idx = 0
+            out = []
+            for group_members in self.groups.values():
+                member = next((m for m in group_members if m in channel_params), None)
+                if member is None:
+                    # Group has no active bands — not encoded, skip.
+                    continue
+
+                num_patch = channel_params[member]["num_patch"]
+                x_ = (
+                    x[:, start_idx : start_idx + num_patch**2, :]
+                    .reshape(-1, num_patch, num_patch, self.single_embedding_shape)
+                    .permute(0, 3, 1, 2)
+                )  # B, C, H, W
+                if num_patch != self.highest_num_patch:
+                    x_ = F.interpolate(
+                        x_,
+                        size=(self.highest_num_patch, self.highest_num_patch),
+                        mode="bilinear",
+                    )
+                out.append(x_)
+                start_idx += num_patch**2
+
+            if self.merge == "sum":
+                merged = torch.sum(torch.stack(out), dim=0)
+            elif self.merge == "mean":
+                merged = torch.mean(torch.stack(out), dim=0)
+            else:  # concat
+                merged = torch.cat(out, dim=1)
+
+            out_features.append(merged)
+
+        return out_features
+
+    def process_channel_list(self, channel_list: list[int]) -> list[int]:
+        if self.merge in ("sum", "mean"):
+            return list(channel_list)
+        # concat multiplies channels by the number of *active* groups.
+        # Use len(channel_list) as a proxy — TerraTorch passes one entry per group.
+        return [c * len(channel_list) for c in channel_list]
