@@ -1,12 +1,12 @@
 [project]
 name = "thor-terratorch-ext"
-version = "0.2.1"
+version = "0.3.0"
 description = "THOR extension for TerraTorch"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "terratorch==1.2.4",
-    "thor @ git+https://github.com/FM4CS/THOR@v1.0.2",
+    "terratorch==1.2.5",
+    "thor @ git+https://github.com/FM4CS/THOR@fused_alibi",
 ]
 
 
@@ -33,9 +33,17 @@ notebook = [
     "stac-asset>=0.4.7",
     "boto3>=1.42.61",
     "gdown>=5.2.1",
-    "phidown[jupyter-env,viz]>=0.1.25",
+    "netcdf4>=1.7.4",
+    "pyresample>=1.35.0",
+    "phidown[jupyter-env,viz]>=0.1.26",
+    "folium>=0.20.0",
     "ipykernel>=7.2.0",
     "ipython>=8.37.0",
     "ipywidgets>=8.1.8",
+    "ipyleaflet>=0.20.0",
 ]
 log = ["wandb>=0.19.11"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+

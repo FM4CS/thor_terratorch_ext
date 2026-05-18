@@ -3,24 +3,33 @@ import warnings
 from copy import deepcopy
 from functools import partial
 from pathlib import Path
-from typing import Any, Iterable, Literal
+from typing import Any, Literal
+from collections.abc import Iterable, Sequence
 
+import numpy as np
 import torch
 import torch.nn.functional as F  # noqa: N812
 import yaml
 from huggingface_hub import hf_hub_download
-from terratorch.datasets import HLSBands, OpticalBands, SARBands
+from numpy.typing import NDArray
 from terratorch.models.necks import Neck
 from terratorch.registry import TERRATORCH_BACKBONE_REGISTRY, TERRATORCH_NECK_REGISTRY
 from thor.core.model_registry import MODELS
 from torch import nn
 
-from thor_terratorch_ext.datasets.utils import OLCIBands, SARThorBands, SLSTRBands
+from thor_terratorch_ext.datasets.utils import (
+    S2L2ABands,
+    S3OLCIBands,
+    S3SLSTRBands,
+    SARThorBands,
+    ThorModalities,
+    MODALITY_BAND_MAPPING,
+)
 
 logger = logging.getLogger(__name__)
 
 
-_default_input_params = {
+_default_input_params: dict[str, Any] = {
     "ground_covers": [2880],  # m
     "aggr_type": "subsetmean",
     "use_superposition_encoding": False,
@@ -81,217 +90,67 @@ _default_input_params = {
         ["S3:S7_BT_in", "S3:S8_BT_in", "S3:S9_BT_in"],
     ],
     # NOTE: the patch sizes are used for the reference patch embedding weights, the actual patch sizes depends on the flexivit patch size
+    # GSD is in meters, patch size is in pixels, so the actual ground cover of a patch in meters is GSD * patch_size
+    # Sentinel-3 bands are interpolated 240, 480 or 960 m GSD to be more compatible with multiples of 6.
     "channels": {
-        "S2:Red": {
-            "GSD": 10,  # m
-            "patch_size": 16,  # px
-        },
-        "S2:Green": {
-            "GSD": 10,  # m
-            "patch_size": 16,  # px
-        },
-        "S2:Blue": {
-            "GSD": 10,
-            "patch_size": 16,  # px
-        },
-        "S2:NIR": {
-            "GSD": 10,
-            "patch_size": 16,  # px
-        },
-        "S2:RE1": {
-            "GSD": 20,
-            "patch_size": 16,  # px
-        },
-        "S2:RE2": {
-            "GSD": 20,
-            "patch_size": 16,  # px
-        },
-        "S2:RE3": {
-            "GSD": 20,
-            "patch_size": 16,  # px
-        },
-        "S2:RE4": {
-            "GSD": 20,
-            "patch_size": 16,  # px
-        },
-        "S2:SWIR1": {
-            "GSD": 20,
-            "patch_size": 16,  # px
-        },
-        "S2:SWIR2": {
-            "GSD": 20,
-            "patch_size": 16,  # px
-        },
-        "S2:CoastAerosal": {
-            "GSD": 60,
-            "patch_size": 16,  # px
-        },
-        "S2:WaterVapor": {
-            "GSD": 60,
-            "patch_size": 16,  # px
-        },
-        # NOTE: new models use patch_embed_name to
-        # use the same patch embedding weights for both IW and EW
-        "S1:IW-VV": {
-            "GSD": 10,
-            "patch_size": 16,  # px
-            "patch_embed_name": "S1:VV",
-        },
-        "S1:IW-VH": {
-            "GSD": 10,
-            "patch_size": 16,  # px
-            "patch_embed_name": "S1:VH",
-        },
-        "S1:IW-HV": {
-            "GSD": 10,
-            "patch_size": 16,  # px
-            "patch_embed_name": "S1:HV",
-        },
-        "S1:IW-HH": {
-            "GSD": 10,
-            "patch_size": 16,  # px
-            "patch_embed_name": "S1:HH",
-        },
-        "S1:EW-VV": {
-            "GSD": 10,
-            "patch_size": 16,  # px
-            "patch_embed_name": "S1:VV",
-        },
-        "S1:EW-VH": {
-            "GSD": 10,
-            "patch_size": 16,  # px
-            "patch_embed_name": "S1:VH",
-        },
-        "S1:EW-HV": {
-            "GSD": 10,  # 250  # 10
-            "patch_size": 16,  # px
-            "patch_embed_name": "S1:HV",
-        },
-        "S1:EW-HH": {
-            "GSD": 10,  # 250 # 10
-            "patch_size": 16,  # px
-            "patch_embed_name": "S1:HH",
-        },
-        "S3:Oa01_reflectance": {
-            "GSD": 240,  # GSD 240 interp
-            "patch_size": 16,  # px
-        },
-        "S3:Oa02_reflectance": {
-            "GSD": 240,  # GSD 240 interp
-            "patch_size": 16,  # px
-        },
-        "S3:Oa03_reflectance": {
-            "GSD": 240,  # GSD 240 interp
-            "patch_size": 16,  # px
-        },
-        "S3:Oa04_reflectance": {
-            "GSD": 240,  # GSD 240 interp
-            "patch_size": 16,  # px
-        },
-        "S3:Oa05_reflectance": {
-            "GSD": 240,  # GSD 240 interp
-            "patch_size": 16,  # px
-        },
-        "S3:Oa06_reflectance": {
-            "GSD": 240,  # GSD 240 interp
-            "patch_size": 16,  # px
-        },
-        "S3:Oa07_reflectance": {
-            "GSD": 240,  # GSD 240 interp
-            "patch_size": 16,  # px
-        },
-        "S3:Oa08_reflectance": {
-            "GSD": 240,  # GSD 240 interp
-            "patch_size": 16,  # px
-        },
-        "S3:Oa09_reflectance": {
-            "GSD": 240,  # GSD 240 interp
-            "patch_size": 16,  # px
-        },
-        "S3:Oa10_reflectance": {
-            "GSD": 240,  # GSD 240 interp
-            "patch_size": 16,  # px
-        },
-        "S3:Oa11_reflectance": {
-            "GSD": 240,  # GSD 240 interp
-            "patch_size": 16,  # px
-        },
-        "S3:Oa12_reflectance": {
-            "GSD": 240,  # GSD 240 interp
-            "patch_size": 16,  # px
-        },
-        "S3:Oa13_reflectance": {
-            "GSD": 240,  # GSD 240 interp
-            "patch_size": 16,  # px
-        },
-        "S3:Oa14_reflectance": {
-            "GSD": 240,  # GSD 240 interp
-            "patch_size": 16,  # px
-        },
-        "S3:Oa15_reflectance": {
-            "GSD": 240,  # GSD 240 interp
-            "patch_size": 16,  # px
-        },
-        "S3:Oa16_reflectance": {
-            "GSD": 240,  # GSD 240 interp
-            "patch_size": 16,  # px
-        },
-        "S3:Oa17_reflectance": {
-            "GSD": 240,  # GSD 240 interp
-            "patch_size": 16,  # px
-        },
-        "S3:Oa18_reflectance": {
-            "GSD": 240,  # GSD 240 interp
-            "patch_size": 16,  # px
-        },
-        "S3:Oa19_reflectance": {
-            "GSD": 240,  # GSD 240 interp
-            "patch_size": 16,  # px
-        },
-        "S3:Oa20_reflectance": {
-            "GSD": 240,  # GSD 240 interp
-            "patch_size": 16,  # px
-        },
-        "S3:Oa21_reflectance": {
-            "GSD": 240,  # GSD 240 interp
-            "patch_size": 16,  # px
-        },
-        "S3:S1_reflectance_an": {
-            "GSD": 480,  # GSD 480 interp
-            "patch_size": 16,  # px
-        },
-        "S3:S2_reflectance_an": {
-            "GSD": 480,  # GSD 480 interp
-            "patch_size": 16,  # px
-        },
-        "S3:S3_reflectance_an": {
-            "GSD": 480,  # GSD 480 interp
-            "patch_size": 16,  # px
-        },
-        "S3:S4_reflectance_an": {
-            "GSD": 480,  # GSD 480 interp
-            "patch_size": 16,  # px
-        },
-        "S3:S5_reflectance_an": {
-            "GSD": 480,  # GSD 480 interp
-            "patch_size": 16,  # px
-        },
-        "S3:S6_reflectance_an": {
-            "GSD": 480,  # GSD 480 interp
-            "patch_size": 16,  # px
-        },
-        "S3:S7_BT_in": {
-            "GSD": 960,  # GSD 960 interp
-            "patch_size": 16,  # px
-        },
-        "S3:S8_BT_in": {
-            "GSD": 960,  # GSD 960 interp
-            "patch_size": 16,  # px
-        },
-        "S3:S9_BT_in": {
-            "GSD": 960,  # GSD 960 interp
-            "patch_size": 16,  # px
-        },
+        # S2-10m bands
+        "S2:Red": {"GSD": 10, "patch_size": 16},
+        "S2:Green": {"GSD": 10, "patch_size": 16},
+        "S2:Blue": {"GSD": 10, "patch_size": 16},
+        "S2:NIR": {"GSD": 10, "patch_size": 16},
+        # S2-20m bands
+        "S2:RE1": {"GSD": 20, "patch_size": 16},
+        "S2:RE2": {"GSD": 20, "patch_size": 16},
+        "S2:RE3": {"GSD": 20, "patch_size": 16},
+        "S2:RE4": {"GSD": 20, "patch_size": 16},
+        "S2:SWIR1": {"GSD": 20, "patch_size": 16},
+        "S2:SWIR2": {"GSD": 20, "patch_size": 16},
+        # S2-60m bands
+        "S2:CoastAerosal": {"GSD": 60, "patch_size": 16},
+        "S2:WaterVapor": {"GSD": 60, "patch_size": 16},
+        # SAR bands variying GSD, defaults to 10m. Add the GSD as suffix to the band name to be able to differentiate them and apply the correct normalization
+        # NOTE: patch_embed_name maps the same patch embedding weights for both IW and EW
+        "S1:IW-VV": {"GSD": 10, "patch_size": 16, "patch_embed_name": "S1:VV"},
+        "S1:IW-VH": {"GSD": 10, "patch_size": 16, "patch_embed_name": "S1:VH"},
+        "S1:IW-HV": {"GSD": 10, "patch_size": 16, "patch_embed_name": "S1:HV"},
+        "S1:IW-HH": {"GSD": 10, "patch_size": 16, "patch_embed_name": "S1:HH"},
+        "S1:EW-VV": {"GSD": 10, "patch_size": 16, "patch_embed_name": "S1:VV"},
+        "S1:EW-VH": {"GSD": 10, "patch_size": 16, "patch_embed_name": "S1:VH"},
+        "S1:EW-HV": {"GSD": 10, "patch_size": 16, "patch_embed_name": "S1:HV"},
+        "S1:EW-HH": {"GSD": 10, "patch_size": 16, "patch_embed_name": "S1:HH"},
+        # S3 OLCI 240 (300)m bands
+        "S3:Oa01_reflectance": {"GSD": 240, "patch_size": 16},
+        "S3:Oa02_reflectance": {"GSD": 240, "patch_size": 16},
+        "S3:Oa03_reflectance": {"GSD": 240, "patch_size": 16},
+        "S3:Oa04_reflectance": {"GSD": 240, "patch_size": 16},
+        "S3:Oa05_reflectance": {"GSD": 240, "patch_size": 16},
+        "S3:Oa06_reflectance": {"GSD": 240, "patch_size": 16},
+        "S3:Oa07_reflectance": {"GSD": 240, "patch_size": 16},
+        "S3:Oa08_reflectance": {"GSD": 240, "patch_size": 16},
+        "S3:Oa09_reflectance": {"GSD": 240, "patch_size": 16},
+        "S3:Oa10_reflectance": {"GSD": 240, "patch_size": 16},
+        "S3:Oa11_reflectance": {"GSD": 240, "patch_size": 16},
+        "S3:Oa12_reflectance": {"GSD": 240, "patch_size": 16},
+        "S3:Oa13_reflectance": {"GSD": 240, "patch_size": 16},
+        "S3:Oa14_reflectance": {"GSD": 240, "patch_size": 16},
+        "S3:Oa15_reflectance": {"GSD": 240, "patch_size": 16},
+        "S3:Oa16_reflectance": {"GSD": 240, "patch_size": 16},
+        "S3:Oa17_reflectance": {"GSD": 240, "patch_size": 16},
+        "S3:Oa18_reflectance": {"GSD": 240, "patch_size": 16},
+        "S3:Oa19_reflectance": {"GSD": 240, "patch_size": 16},
+        "S3:Oa20_reflectance": {"GSD": 240, "patch_size": 16},
+        "S3:Oa21_reflectance": {"GSD": 240, "patch_size": 16},
+        # S3 SLSTR REFL 480 (500)m bands
+        "S3:S1_reflectance_an": {"GSD": 480, "patch_size": 16},
+        "S3:S2_reflectance_an": {"GSD": 480, "patch_size": 16},
+        "S3:S3_reflectance_an": {"GSD": 480, "patch_size": 16},
+        "S3:S4_reflectance_an": {"GSD": 480, "patch_size": 16},
+        "S3:S5_reflectance_an": {"GSD": 480, "patch_size": 16},
+        "S3:S6_reflectance_an": {"GSD": 480, "patch_size": 16},
+        # S3 SLSTR BT bands at 960 (1000)m GSD
+        "S3:S7_BT_in": {"GSD": 960, "patch_size": 16},
+        "S3:S8_BT_in": {"GSD": 960, "patch_size": 16},
+        "S3:S9_BT_in": {"GSD": 960, "patch_size": 16},
     },
 }
 
@@ -302,18 +161,18 @@ _user_overridable_params = {
     "select_patch_strategy": "Strategy for choosing patch sizes across groups (min, max, equal-*)",
 }
 
-
-def _format_overridable_params() -> str:
-    return ", ".join(
-        f"{key}: {_user_overridable_params[key]}"
-        for key in sorted(_user_overridable_params)
-    )
+_DEFAULT_GROUPS: dict[str, list[str]] = {
+    f"group{i}": group for i, group in enumerate(_default_input_params["groups"])
+}
 
 
 def _ensure_allowed_input_params(keys: Iterable[str]) -> None:
     disallowed_keys = sorted(set(keys) - set(_user_overridable_params))
     if disallowed_keys:
-        allowed_str = _format_overridable_params()
+        allowed_str = ", ".join(
+            f"{key}: {_user_overridable_params[key]}"
+            for key in sorted(_user_overridable_params)
+        )
         msg = (
             "Cannot override the following THOR ViT input params via configuration: "
             f"{disallowed_keys}. Allowed keys: {allowed_str}"
@@ -365,6 +224,18 @@ THOR_NORMALIZATION_PARAMS = {
     # S1-EW-HH-10m #################
     "S1:EW-HH_10": {"mean": -12.7691, "std": 6.6416},
     "S1:EW-HV_10": {"mean": -22.6922, "std": 7.2472},
+    # S1-IW-VV (10m) #################
+    "S1:IW-VH": {"mean": -20.6958, "std": 5.8688},
+    "S1:IW-VV": {"mean": -12.9850, "std": 5.0062},
+    # S1-IW-HH (10m) #################
+    "S1:IW-HH": {"mean": -13.9485, "std": 6.8015},
+    "S1:IW-HV": {"mean": -22.4575, "std": 6.9106},
+    # S1-EW-VV (10m) #################
+    "S1:EW-VH": {"mean": -23.5719, "std": 6.8895},
+    "S1:EW-VV": {"mean": -13.9046, "std": 6.3085},
+    # S1-EW-HH (10m) #################
+    "S1:EW-HH": {"mean": -12.7691, "std": 6.6416},
+    "S1:EW-HV": {"mean": -22.6922, "std": 7.2472},
     # S3-250m #################
     "S3:Oa01_reflectance": {"mean": 0.418360, "std": 0.271155},
     "S3:Oa02_reflectance": {"mean": 0.407687, "std": 0.276213},
@@ -402,6 +273,7 @@ THOR_NORMALIZATION_PARAMS = {
 ###########################################################################################
 
 
+# Mapping from terratorch band names to thor model band names
 lookup_band = {
     # Optical bands
     "COASTAL_AEROSOL": "S2:CoastAerosal",
@@ -413,9 +285,9 @@ lookup_band = {
     "RED_EDGE_3": "S2:RE3",
     "NIR_BROAD": "S2:NIR",
     "NIR_NARROW": "S2:RE4",
+    "WATER_VAPOR": "S2:WaterVapor",
     "SWIR_1": "S2:SWIR1",
     "SWIR_2": "S2:SWIR2",
-    "WATER_VAPOR": "S2:WaterVapor",
     # SAR bands
     "VV": "S1:IW-VV",
     "VH": "S1:IW-VH",
@@ -465,10 +337,111 @@ lookup_band = {
     "S9_BT_IN": "S3:S9_BT_in",
 }
 
-# NOTE: this gets edited in the THOREncoderWrapper to match the actual groups used
-AVAILABLE_GROUPS = {
-    f"group{i}": group for i, group in enumerate(_default_input_params["groups"])
-}
+
+_ALL_INTERNAL_NAMES: set[str] = set(_default_input_params["channels"].keys())
+
+
+def _to_internal_band_name(name: str) -> str:
+    """Map a single band name to its internal THOR name.
+
+    Accepts band enum values (e.g. ``"BLUE"``, ``"IW_VV"``), or internal names already
+    (e.g. ``"S2:Blue"``).
+
+    Raises ``ValueError`` if the name cannot be resolved.
+    """
+    if name in lookup_band:
+        return lookup_band[name]
+    if name in _ALL_INTERNAL_NAMES:
+        return name
+    msg = f"Cannot resolve '{name}' to an internal THOR band name."
+    raise ValueError(msg)
+
+
+def _resolve_band_key(key: str) -> list[str]:
+    """Resolve a user-facing key to a list of internal THOR band names.
+
+    The *key* may be:
+    - A ``ThorModalities`` value (e.g. ``"S2L2A"``, ``"S1GRD"``): this will be
+        expanded to all bands in that modality (e.g. all S2L2A bands,
+        or all SAR bands for the SAR modalities).
+    - A band enum value, alias, or internal name
+
+    Returns a list of **internal** band names (``"S2:Blue"`` style).
+    """
+    # 1) Try as a modality key (may expand to many bands)
+    try:
+        modality = ThorModalities(key)
+        if modality.value in {
+            ThorModalities.S1GRD.value,
+            ThorModalities.S1GRD_VV_VH.value,
+            ThorModalities.S1GRD_HH_HV.value,
+        }:
+            # All internal SAR band names (IW + EW, all polarisations)
+            return [lookup_band[b.value] for b in SARThorBands]
+        return [
+            _to_internal_band_name(b.value) for b in MODALITY_BAND_MAPPING[modality]
+        ]
+    except ValueError:
+        pass
+
+    # 2) Try as a single band name / alias / internal name
+    try:
+        return [_to_internal_band_name(key)]
+    except ValueError:
+        pass
+
+    msg = (
+        f"Cannot resolve patch_sizes key '{key}' to any THOR band or modality. "
+        f"Valid modality keys: {[m.value for m in ThorModalities]}. "
+        f"Valid band names: see S2L2ABands, SARThorBands, S3OLCIBands, S3SLSTRBands enums or internal names like 'S2:Blue'."
+    )
+    raise ValueError(msg)
+
+
+def _normalize_patch_sizes(
+    patch_sizes: int | list[int] | dict[str, int | list[int]],
+) -> list[int] | dict[str, list[int]]:
+    """Normalise ``patch_sizes`` into the format expected by THOR internals.
+
+    Accepted forms
+    --------------
+    * ``int`` : single patch size applied globally.
+    * ``list[int]`` : list of candidate patch sizes applied globally.
+    * ``dict[str, int | list[int]]`` : per-key specification.  Keys may be
+      ``ThorModalities`` values, band enum values, or internal THOR band
+      names.  Each key is expanded/normalised to internal band names.
+
+    Returns
+    -------
+    ``list[int]`` when the input is uniform (int or list), or
+    ``dict[str, list[int]]`` keyed by **internal** THOR band names.
+    """
+    if isinstance(patch_sizes, int):
+        return [patch_sizes]
+
+    if isinstance(patch_sizes, list):
+        return patch_sizes
+
+    if isinstance(patch_sizes, dict):
+        expanded: dict[str, list[int]] = {}
+        for key, value in patch_sizes.items():
+            sizes = [value] if isinstance(value, int) else list(value)
+            for internal_name in _resolve_band_key(key):
+                if internal_name in expanded:
+                    logger.warning(
+                        f"patch_sizes: key '{key}' resolved to '{internal_name}' "
+                        f"which was already set; overwriting."
+                    )
+                expanded[internal_name] = sizes
+        return expanded
+
+    msg = (
+        f"patch_sizes must be int, list[int], or dict[str, int | list[int]], "
+        f"got {type(patch_sizes).__name__}"
+    )
+    raise TypeError(msg)
+
+
 ###################################################################################
 
 
@@ -499,15 +472,48 @@ pretrained_weights = {
 }
 
 
+def normalise_for_thor(
+    arr: NDArray,
+    band_keys: Sequence[str | S2L2ABands | SARThorBands | S3SLSTRBands | S3OLCIBands],
+) -> NDArray:
+    """Normalise a (C, H, W) array using THOR pretraining statistics.
+    Useful for running inference on single scenes where you don't have the dataset level statistics to do a more accurate normalisation.
+
+    Parameters
+    ----------
+    arr:
+        Float array of shape (C, H, W).  NaN values are replaced by the
+        band mean before normalisation.
+    band_keys:
+        List of C THOR band keys, e.g.
+        ``['S3:Oa01_reflectance', ..., 'S3:S1_reflectance_an', ...]``.
+
+    Returns
+    -------
+    np.ndarray
+        Normalised array, same shape as *arr*.
+    """
+
+    band_keys_normalized: list[str] = [
+        k.value if not isinstance(k, str) else k for k in band_keys
+    ]
+    band_keys_normalized = [lookup_band.get(k, k) for k in band_keys_normalized]
+
+    out = arr.copy()
+    for i, key in enumerate(band_keys_normalized):
+        m = THOR_NORMALIZATION_PARAMS[key]["mean"]
+        s = THOR_NORMALIZATION_PARAMS[key]["std"]
+        out[i] = (np.nan_to_num(arr[i], nan=m) - m) / s
+    return out
+
+
 def process_thor_bands(
-    bands: list[
-        HLSBands | OpticalBands | SARBands | SARThorBands | OLCIBands | SLSTRBands
-    ],
+    bands: Sequence[S2L2ABands | SARThorBands | S3OLCIBands | S3SLSTRBands | str],
 ) -> tuple[list[str], dict[str, dict[str, Any]]]:
     """
     Process a list of bands and map them to THOR band names. For SAR bands, handle GSD suffixes and update channel parameters accordingly.
     Args:
-        bands (list[HLSBands | OpticalBands | SARBands | SARThorBands | OLCIBands | SLSTRBands]): List of bands to process.
+        bands (Sequence[S2L2ABands | SARThorBands | S3OLCIBands | S3SLSTRBands | str]): List of bands to process.
     Returns:
         tuple[list[str], dict[str, dict[str, Any]]]: A tuple containing the list of THOR band names and the updated channel parameters.
     Raises:
@@ -526,7 +532,7 @@ def process_thor_bands(
                 (part in band.split("_") for part in ["VV", "VH", "HH", "HV"])
             ):
                 band = "_".join(band.split("_")[:-1])
-                thor_band = lookup_band[band]
+                thor_band = _to_internal_band_name(band)
                 logger.info(
                     f"Detected GSD suffix: {gsd_str} for band: {band}, mapped to THOR band: {thor_band}"
                 )
@@ -542,7 +548,7 @@ def process_thor_bands(
                     )
                 channel_params[thor_band]["GSD"] = int(gsd_str)
                 group_channel_members = None
-                for group in AVAILABLE_GROUPS.values():
+                for group in _DEFAULT_GROUPS.values():
                     if thor_band in group:
                         group_channel_members = group
                         break
@@ -561,10 +567,10 @@ def process_thor_bands(
 
                 thor_bands.append(thor_band)
             else:
-                thor_band = lookup_band[band]
+                thor_band = _to_internal_band_name(band)
                 thor_bands.append(thor_band)
 
-        except KeyError:
+        except ValueError:
             msg = f"This band is not implemented in THOR: {band}"
             raise NotImplementedError(msg)
 
@@ -577,156 +583,27 @@ def process_thor_bands(
     return thor_bands, channel_params
 
 
-@TERRATORCH_NECK_REGISTRY.register
-class THORGroupReshapeTokensToImage(Neck):
-    def __init__(
-        self,
-        channel_list: list[int],
-        merge: Literal["concat", "sum", "mean"] = "concat",
-        remove_cls_token=False,
-    ):
-        """THOR specific neck to transform sequence of tokens into a feature map.
-
-        First extracts the embeddings for each group, then reshapes each group into feature maps.
-        Finally, interpolates the feature maps to the highest num_patches and concatenates the feature maps.
-
-        Args:
-            channel_list (list[int]): List of input channel sizes
-            merge (str): Method to merge the feature maps from different groups, either 'concat', 'sum' or 'mean'
-            remove_cls_token (bool): Whether to remove the cls token from the input features
-
-        """
-
-        logger.warning(
-            "THORGroupReshapeTokensToImage is deprecated. "
-            "Set merge_method in THOREncoderWrapper/load_thor_model instead.",
-            stacklevel=2,
-        )
-        super().__init__(channel_list)
-
-        # TODO: add support for or make other necks which allow for alternatives to interpolation and channel wise concat
-        # For example: generate a feature pyramid from one single input, by extracting embeddings for different groups
-
-        assert all(self.channel_list[0] == c for c in self.channel_list), (
-            "All channels must have the same embedding size"
-        )
-
-        self.single_embedding_shape = self.channel_list[0]
-        self.groups = dict(AVAILABLE_GROUPS)
-        assert merge in ["concat", "sum", "mean"], (
-            "Merge must be either 'concat', 'sum' or 'mean'"
-        )
-        self.merge = merge
-        self.remove_cls_token = remove_cls_token
-        self.highest_num_patch = None
-
-    def forward(
-        self,
-        features: list[torch.Tensor] | tuple[list[torch.Tensor], dict[str, Any]],
-        **kwargs,
-    ) -> list[torch.Tensor]:
-        """Stack embeddings for each group, requires interpolation to the highest num_patch."""
-
-        if (
-            isinstance(features, list)
-            and features
-            and isinstance(features[0], torch.Tensor)
-            and features[0].dim() == 4
-        ):
-            logger.debug(
-                "THORGroupReshapeTokensToImage received already-merged image features, returning input unchanged."
-            )
-            return features
-
-        if isinstance(features, tuple):
-            features, channel_params = features
-            highest_num_patch = 0
-            for _channel, params in channel_params.items():
-                num_patch = params["num_patch"]
-                highest_num_patch = max(highest_num_patch, num_patch)
-                self.highest_num_patch = highest_num_patch
-        else:
-            msg = (
-                "THORGroupReshapeTokensToImage requires channel_params to be passed during forward "
-                "please set return_channel_params=True in the THOREncoderWrapper"
-            )
-            raise ValueError(msg)
-
-        out_features = []
-        for feature in features:
-            if self.remove_cls_token:
-                x = feature[:, 1:]
-            else:
-                x = feature
-
-            start_idx = 0
-            out = []
-            # Important that we iterate through this in the same order we encoded
-            for group_members in self.groups.values():
-                member = next((m for m in group_members if m in channel_params), None)
-                if member is None:
-                    msg = f"None of the group members {group_members} found in channel_params"
-                    raise ValueError(msg)
-
-                num_patch = channel_params[member]["num_patch"]
-
-                x_ = x[:, start_idx : start_idx + num_patch**2, :].reshape(
-                    -1, num_patch, num_patch, self.single_embedding_shape
-                )  # B, num_patch, num_patch, C
-                x_ = x_.permute(0, 3, 1, 2)  # B, C, H, W
-                # TODO: maybe add support for learned interpolation and/or learned channel reduction
-                if num_patch != self.highest_num_patch:
-                    x_ = F.interpolate(
-                        x_,
-                        size=(self.highest_num_patch, self.highest_num_patch),
-                        mode="bilinear",
-                    )
-
-                out.append(x_)
-                start_idx += num_patch**2
-
-            if start_idx != x.shape[1]:
-                msg = f"Number of patches used: {start_idx} does not match input shape {x.shape[-1]}"
-                raise ValueError(msg)
-
-            if self.merge == "sum":
-                out = torch.sum(torch.stack(out), dim=0)
-            elif self.merge == "mean":
-                out = torch.mean(torch.stack(out), dim=0)
-            elif self.merge == "concat":
-                out = torch.cat(out, dim=1)
-            out_features.append(out)
-
-        return out_features
-
-    def process_channel_list(self, channel_list: list[int]) -> list[int]:
-        if self.merge in ["sum", "mean"]:
-            return [c for c in channel_list]
-        elif self.merge == "concat":
-            return [c * len(self.groups) for c in channel_list]
-
-
 class THOREncoderWrapper(nn.Module):
     def __init__(
         self,
-        model: nn.Module = None,
+        model: Any,
         bands: list[str] | None = None,
         out_indices: list[int] | None = None,
         return_channel_params: bool = False,
-        merge_method: Literal["concat", "sum", "mean"] | None = None,
+        merge_method: Literal["concat", "sum", "mean", "group"] | None = None,
     ) -> None:
         super().__init__()
 
         self.model = model
         self.return_channel_params = return_channel_params
-        if merge_method not in ["concat", "sum", "mean", None]:
+        if merge_method not in ["concat", "sum", "mean", "group", None]:
             msg = (
                 f"Unknown merge_method={merge_method!r}. "
-                "Expected one of 'concat', 'sum', 'mean', or None."
+                "Expected one of 'concat', 'sum', 'mean', 'group', or None."
             )
             raise ValueError(msg)
         self.merge_method = merge_method
-        self.channels = self.model.channels
+        self.channels: dict[str, dict[str, Any]] = self.model.channels
 
         if bands is None:
             logger.info("Bands not provided, using model default bands")
@@ -734,25 +611,6 @@ class THOREncoderWrapper(nn.Module):
         self.bands = bands
         self.band_index = list(range(len(bands)))
         self.groups = self.model.get_available_groups(dict.fromkeys(self.bands, None))
-        # Reset and update AVAILABLE_GROUPS so the neck (created after the encoder)
-        # sees the correct groups for *this* model, without permanently corrupting the
-        # global for models created earlier in the same session.
-        AVAILABLE_GROUPS.clear()
-        AVAILABLE_GROUPS.update(
-            {
-                f"group{i}": group
-                for i, group in enumerate(_default_input_params["groups"])
-            }
-        )
-        removed_groups = []
-        for group_name in list(AVAILABLE_GROUPS.keys()):
-            if group_name not in self.groups:
-                removed_groups.append(group_name)
-                del AVAILABLE_GROUPS[group_name]
-        if removed_groups:
-            logger.info(
-                f"Removed groups: {removed_groups}. Remaining groups: {list(AVAILABLE_GROUPS.keys())}"
-            )
 
         logger.info(f"Groups: {self.groups}")
         logger.info(f"Bands: {self.bands}")
@@ -767,7 +625,7 @@ class THOREncoderWrapper(nn.Module):
 
         if out_indices is None:
             num_blocks = len(self.model.blocks)
-            out_indices = list(range(0, num_blocks, 1))  # every block
+            out_indices = list(range(num_blocks))
         self.out_indices = out_indices
 
         # TODO: do this a better way
@@ -790,26 +648,63 @@ class THOREncoderWrapper(nn.Module):
             )
         return [self.single_embedding_shape] * len(self.out_indices)
 
-    def _preprocess_input(self, x):
-        x = {
-            channel: F.interpolate(
-                x[:, [band_index], :, :],
-                (
-                    int(self.ground_cover / self.channels[channel]["GSD"]),
-                    int(self.ground_cover / self.channels[channel]["GSD"]),
-                ),
-                mode="bilinear",
-            )
-            for band_index, channel in zip(self.band_index, self.bands, strict=False)
-        }
+    def _preprocess_input(
+        self, x: torch.Tensor | dict[str, torch.Tensor]
+    ) -> dict[str, torch.Tensor]:
+        if isinstance(x, dict):
+            result: dict[str, torch.Tensor] = {}
+            for modality_str, tensor in x.items():
+                base_modality_str, _ = _parse_modality_gsd(modality_str)
+                try:
+                    modality = ThorModalities(base_modality_str)
+                except ValueError as e:
+                    raise ValueError(
+                        f"Invalid modality key '{modality_str}' in input dict. Expected one of {[m.value for m in ThorModalities]}."
+                    ) from e
 
-        return x
+                for ch_idx, band_name in enumerate(MODALITY_BAND_MAPPING[modality]):
+                    internal_band_name = lookup_band.get(band_name.value)
+                    if internal_band_name not in self.bands:
+                        continue
+                    if ch_idx >= tensor.shape[1]:
+                        raise ValueError(
+                            f"Modality '{modality}': expected at least {ch_idx + 1} channels for band '{band_name}' but tensor only has {tensor.shape[1]} channels."
+                        )
+                    size = int(
+                        self.ground_cover / self.channels[internal_band_name]["GSD"]
+                    )
+                    result[internal_band_name] = F.interpolate(
+                        tensor[:, [ch_idx], :, :],
+                        (size, size),
+                        mode="bilinear",
+                    )
+            if not result:
+                raise ValueError(
+                    "No valid bands found in modality dict input. "
+                    f"Received modalities: {list(x)}, "
+                    f"model bands: {self.bands}."
+                )
+            return result
+        else:
+            return {
+                channel: F.interpolate(
+                    x[:, [band_index], :, :],
+                    (
+                        size := int(self.ground_cover / self.channels[channel]["GSD"]),
+                        size,
+                    ),
+                    mode="bilinear",
+                )
+                for band_index, channel in zip(
+                    self.band_index, self.bands, strict=False
+                )
+            }
 
     def _merge_tokens_to_image_features(
         self,
         features: list[torch.Tensor],
         channel_params: dict[str, dict[str, Any]],
-    ) -> list[torch.Tensor]:
+    ) -> list[torch.Tensor] | dict[str, torch.Tensor]:
         highest_num_patch = 0
         for _channel, params in channel_params.items():
             num_patch = params["num_patch"]
@@ -821,6 +716,7 @@ class THOREncoderWrapper(nn.Module):
 
             start_idx = 0
             grouped = []
+            grouped_tokens = {}
             # Important that we iterate through this in the same order we encoded.
             for group_members in self.groups.values():
                 member = next((m for m in group_members if m in channel_params), None)
@@ -834,14 +730,17 @@ class THOREncoderWrapper(nn.Module):
                     -1, num_patch, num_patch, self.single_embedding_shape
                 )  # B, num_patch, num_patch, C
                 x_ = x_.permute(0, 3, 1, 2)  # B, C, H, W
-                if num_patch != highest_num_patch:
-                    x_ = F.interpolate(
-                        x_,
-                        size=(highest_num_patch, highest_num_patch),
-                        mode="bilinear",
-                    )
+                if self.merge_method == "group":
+                    grouped_tokens[member] = x_
+                else:
+                    if num_patch != highest_num_patch:
+                        x_ = F.interpolate(
+                            x_,
+                            size=(highest_num_patch, highest_num_patch),
+                            mode="bilinear",
+                        )
+                    grouped.append(x_)
 
-                grouped.append(x_)
                 start_idx += num_patch**2
 
             if start_idx != x.shape[1]:
@@ -854,6 +753,8 @@ class THOREncoderWrapper(nn.Module):
                 out = torch.mean(torch.stack(grouped), dim=0)
             elif self.merge_method == "concat":
                 out = torch.cat(grouped, dim=1)
+            elif self.merge_method == "group":
+                out = grouped_tokens
             else:
                 msg = f"Unsupported merge_method: {self.merge_method}"
                 raise NotImplementedError(msg)
@@ -864,7 +765,11 @@ class THOREncoderWrapper(nn.Module):
 
     def forward(
         self, x, **kwargs
-    ) -> list[torch.Tensor] | tuple[list[torch.Tensor], dict[str, Any]]:
+    ) -> (
+        list[torch.Tensor]
+        | dict[str, torch.Tensor]
+        | tuple[list[torch.Tensor] | dict[str, torch.Tensor], dict[str, Any]]
+    ):
 
         x = self._preprocess_input(x)
 
@@ -894,10 +799,90 @@ class THOREncoderWrapper(nn.Module):
         pass
 
 
+def _parse_modality_gsd(modality_str: str) -> tuple[str, int | None]:
+    """Strip an optional numeric GSD suffix from a modality string.
+
+    E.g. ``"S1GRD_240"`` → ``("S1GRD", 240)``, ``"S2L2A"`` → ``("S2L2A", None)``.
+    """
+    base, _, suffix = modality_str.rpartition("_")
+    if base and suffix.isdigit():
+        return base, int(suffix)
+    return modality_str, None
+
+
+def bands_from_modalities(
+    modalities: list[ThorModalities | str]
+    | dict[
+        ThorModalities | str,
+        Sequence[S2L2ABands | SARThorBands | S3OLCIBands | S3SLSTRBands],
+    ],
+) -> Sequence[S2L2ABands | SARThorBands | S3OLCIBands | S3SLSTRBands | str]:
+    """Convert a modalities specification to a flat list of band names.
+
+    Args:
+        modalities: Either a list of modality keys (use all bands for each) or
+            a dict mapping each modality key to a subset of its bands.  Modality
+            keys are ``ThorModalities`` enum members or equivalent strings.
+            Per-modality band lists follow the same format as ``model_bands``
+            (band enum values or their ``.value`` strings).
+
+    Returns:
+        List of THOR band names (e.g. ``"IW_VV"``)
+        in the order they were encountered.
+    """
+    seen: set[S2L2ABands | SARThorBands | S3OLCIBands | S3SLSTRBands] = set()
+    bands: list[S2L2ABands | SARThorBands | S3OLCIBands | S3SLSTRBands] = []
+
+    if isinstance(modalities, list):
+        for modality in modalities:
+            gsd: int | None = None
+            if isinstance(modality, str):
+                modality, gsd = _parse_modality_gsd(modality)
+                try:
+                    modality = ThorModalities(modality)
+                except ValueError as e:
+                    raise ValueError(
+                        f"Invalid modality '{modality}' in modalities list. Expected one of {[m.value for m in ThorModalities]}."
+                    ) from e
+            for band in MODALITY_BAND_MAPPING[modality]:
+                if band not in seen:
+                    # Append band with GSD suffix so process_thor_bands() applies the override
+                    bands.append(f"{band.value}_{gsd}" if gsd is not None else band)
+                    seen.add(band)
+    else:
+        for modality, subset in modalities.items():
+            if isinstance(modality, str):
+                modality, _ = _parse_modality_gsd(modality)
+                try:
+                    modality = ThorModalities(modality)
+                except ValueError as e:
+                    raise ValueError(
+                        f"Invalid modality '{modality}' in modalities dict. Expected one of {[m.value for m in ThorModalities]}."
+                    ) from e
+            available_bands = MODALITY_BAND_MAPPING[modality]
+            available = set(available_bands)
+            by_value = {band.value: band for band in available_bands}
+            for band in subset:
+                normalized_band = by_value.get(band, band) if isinstance(band, str) else band
+                if normalized_band not in available:
+                    raise ValueError(
+                        f"Band '{band}' is not part of modality '{modality.value}'. Available: {list(available)}."
+                    )
+                if normalized_band not in seen:
+                    bands.append(normalized_band)
+                    seen.add(normalized_band)
+
+    return bands
+
+
 def load_thor_model(
     model_name: str,
-    model_bands: list[
-        HLSBands | OpticalBands | SARBands | SARThorBands | OLCIBands | SLSTRBands
+    model_bands: Sequence[S2L2ABands | SARThorBands | S3OLCIBands | S3SLSTRBands]
+    | None = None,
+    modalities: list[ThorModalities | str]
+    | dict[
+        ThorModalities | str,
+        Sequence[S2L2ABands | SARThorBands | S3OLCIBands | S3SLSTRBands],
     ]
     | None = None,
     out_indices: list[int] | None = None,
@@ -911,39 +896,62 @@ def load_thor_model(
         )
         logger.debug(f"Mapped model name to full THOR model name: {model_name}")
 
-    if model_bands is None:
-        logger.info("Model bands not provided, using HLS and SAR bands by default")
-        model_bands = [
-            HLSBands.COASTAL_AEROSOL,
-            HLSBands.BLUE,
-            HLSBands.GREEN,
-            HLSBands.RED,
-            HLSBands.NIR_BROAD,
-            HLSBands.RED_EDGE_1,
-            HLSBands.RED_EDGE_2,
-            HLSBands.RED_EDGE_3,
-            HLSBands.NIR_NARROW,
-            HLSBands.SWIR_1,
-            HLSBands.SWIR_2,
-            HLSBands.WATER_VAPOR,
-            SARBands.VV,
-            SARBands.VH,
-        ]
+    if model_bands is not None and modalities is not None:
+        raise ValueError("Specify either 'model_bands' or 'modalities', not both.")
 
-    # Map to THOR bands names and get updated channel params if necessary
-    bands, channel_params_updated = process_thor_bands(model_bands)
+    if modalities is not None:
+        logger.info(f"Deriving model bands from modalities: {modalities}")
+        modality_bands = bands_from_modalities(modalities)
+        bands, channel_params_updated = process_thor_bands(modality_bands)
+    else:
+        if model_bands is None:
+            logger.info(
+                "Model bands not provided, using S2L2A and SAR bands by default"
+            )
+            model_bands = [
+                S2L2ABands.COASTAL_AEROSOL,
+                S2L2ABands.BLUE,
+                S2L2ABands.GREEN,
+                S2L2ABands.RED,
+                S2L2ABands.NIR_BROAD,
+                S2L2ABands.RED_EDGE_1,
+                S2L2ABands.RED_EDGE_2,
+                S2L2ABands.RED_EDGE_3,
+                S2L2ABands.NIR_NARROW,
+                S2L2ABands.WATER_VAPOR,
+                S2L2ABands.SWIR_1,
+                S2L2ABands.SWIR_2,
+                SARThorBands.IW_VV,
+                SARThorBands.IW_VH,
+            ]
+        # Map to THOR band names and get updated channel params if necessary
+        bands, channel_params_updated = process_thor_bands(model_bands)
     logger.debug(f"bands mapped to thor: {bands}")
 
     config = kwargs.pop("config", None)
     if isinstance(config, str | Path):
         logger.info(f"Loading backbone config from {config}")
-        config = yaml.safe_load(open(config))
+        config = yaml.safe_load(Path(config).read_text())
     ckpt_path = kwargs.pop(
         "ckpt", None
     )  # path to checkpoint to load, will override config if provided
-    input_params = kwargs.pop(
-        "input_params", {}
-    )  # dict with input params to override config if provided
+
+    # ---- new top-level kwargs --------------------------------
+    ground_cover = kwargs.pop("ground_cover", None)
+    patch_sizes = kwargs.pop("patch_sizes", None)
+    ref_patch_size = kwargs.pop("ref_patch_size", None)
+    select_patch_strategy = kwargs.pop("select_patch_strategy", None)
+
+    # ---- deprecated input_params dict ----------------------------------------
+    input_params = kwargs.pop("input_params", {})
+    if input_params:
+        warnings.warn(
+            "Passing 'input_params' is deprecated. Use the top-level kwargs "
+            "'ground_cover', 'patch_sizes', 'ref_patch_size', and "
+            "'select_patch_strategy' instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
     return_channel_params = kwargs.pop("return_channel_params", False)
     merge_method = kwargs.pop("merge_method", None)
@@ -991,6 +999,7 @@ def load_thor_model(
             )
         model_config["ckpt"] = ckpt_path
 
+    # ---- apply deprecated input_params (lowest priority) ---------------------
     if input_params:
         _ensure_allowed_input_params(input_params.keys())
         for k, v in input_params.items():
@@ -1004,6 +1013,20 @@ def load_thor_model(
                     f"Setting input param {k} for model {model_checkpoint_key} to {v}"
                 )
             model_config["input_params"][k] = v
+
+    # ---- apply new top-level kwargs (highest priority) -----------------------
+    if ground_cover is not None:
+        if isinstance(ground_cover, (int, float)):
+            ground_cover = [int(ground_cover)]
+        model_config["input_params"]["ground_covers"] = ground_cover
+    if patch_sizes is not None:
+        model_config["input_params"]["flexivit_patch_size_seqs"] = (
+            _normalize_patch_sizes(patch_sizes)
+        )
+    if ref_patch_size is not None:
+        model_config["input_params"]["flexivit_ref_patch_size"] = ref_patch_size
+    if select_patch_strategy is not None:
+        model_config["input_params"]["select_patch_strategy"] = select_patch_strategy
 
     if pretrained and model_config["ckpt"] is None:
         logger.info(f"Using pretrained weights for model {model_checkpoint_key}")
@@ -1061,3 +1084,117 @@ def register_thor_models():
 
 
 register_thor_models()
+
+
+# ---------------------------------------------------------------------------
+# Backward-compatibility neck
+# ---------------------------------------------------------------------------
+# Old checkpoints were saved with THORGroupReshapeTokensToImage as the neck.
+# This class was removed in favour of merge_method inside THOREncoderWrapper.
+# New code should use merge_method instead.
+# ---------------------------------------------------------------------------
+
+
+@TERRATORCH_NECK_REGISTRY.register
+class THORGroupReshapeTokensToImage(Neck):
+    """Backward-compatibility neck: reshape THOR token sequences to 2-D feature maps.
+
+    Kept only so that checkpoints trained with this neck can still be loaded.
+    For new models use ``merge_method`` in :func:`load_thor_model` /
+    :class:`THOREncoderWrapper` instead.
+    """
+
+    def __init__(
+        self,
+        channel_list: list[int],
+        merge: Literal["concat", "sum", "mean"] = "concat",
+        remove_cls_token: bool = False,
+    ):
+        warnings.warn(
+            "THORGroupReshapeTokensToImage is deprecated and kept only for "
+            "checkpoint backward compatibility. Use merge_method in "
+            "load_thor_model / THOREncoderWrapper instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        super().__init__(channel_list)
+        assert all(c == channel_list[0] for c in channel_list), (
+            "All input channels must have the same embedding size."
+        )
+        self.single_embedding_shape = channel_list[0]
+        # Use all default groups; inactive ones are skipped in forward().
+        self.groups = dict(_DEFAULT_GROUPS)
+        assert merge in ("concat", "sum", "mean"), (
+            "merge must be 'concat', 'sum', or 'mean'."
+        )
+        self.merge = merge
+        self.remove_cls_token = remove_cls_token
+        self.highest_num_patch: int | None = None
+
+    def forward(
+        self,
+        features: list[torch.Tensor] | tuple[list[torch.Tensor], dict],
+        **kwargs,
+    ) -> list[torch.Tensor]:  # ty:ignore[invalid-method-override]
+        # Already-merged 4-D feature maps — pass through unchanged.
+        if (
+            isinstance(features, list)
+            and features
+            and isinstance(features[0], torch.Tensor)
+            and features[0].dim() == 4
+        ):
+            return features
+
+        if not isinstance(features, tuple):
+            raise ValueError(
+                "THORGroupReshapeTokensToImage requires channel_params to be passed "
+                "during forward. Set return_channel_params=True in THOREncoderWrapper."
+            )
+
+        features, channel_params = features
+        self.highest_num_patch = max(p["num_patch"] for p in channel_params.values())
+
+        out_features = []
+        for feature in features:
+            x = feature[:, 1:] if self.remove_cls_token else feature
+
+            start_idx = 0
+            out = []
+            for group_members in self.groups.values():
+                member = next((m for m in group_members if m in channel_params), None)
+                if member is None:
+                    # Group has no active bands — not encoded, skip.
+                    continue
+
+                num_patch = channel_params[member]["num_patch"]
+                x_ = (
+                    x[:, start_idx : start_idx + num_patch**2, :]
+                    .reshape(-1, num_patch, num_patch, self.single_embedding_shape)
+                    .permute(0, 3, 1, 2)
+                )  # B, C, H, W
+                if num_patch != self.highest_num_patch:
+                    x_ = F.interpolate(
+                        x_,
+                        size=(self.highest_num_patch, self.highest_num_patch),
+                        mode="bilinear",
+                    )
+                out.append(x_)
+                start_idx += num_patch**2
+
+            if self.merge == "sum":
+                merged = torch.sum(torch.stack(out), dim=0)
+            elif self.merge == "mean":
+                merged = torch.mean(torch.stack(out), dim=0)
+            else:  # concat
+                merged = torch.cat(out, dim=1)
+
+            out_features.append(merged)
+
+        return out_features
+
+    def process_channel_list(self, channel_list: list[int]) -> list[int]:
+        if self.merge in ("sum", "mean"):
+            return list(channel_list)
+        # concat multiplies channels by the number of *active* groups.
+        # Use len(channel_list) as a proxy — TerraTorch passes one entry per group.
+        return [c * len(channel_list) for c in channel_list]

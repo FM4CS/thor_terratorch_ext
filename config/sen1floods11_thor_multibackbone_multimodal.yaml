@@ -164,16 +164,14 @@ model:
         - IW_VV
         - IW_VH
       backbone_merge_features: concat
-      backbone_rescale_features: null
+      backbone_rescale_features: down
       backbone_encoders:
         - thor_v1_base:
             freeze_backbone: true
             backbone_merge_method: concat
             backbone_pretrained: true
-            backbone_input_params:
-              ground_covers: [2880]
-              flexivit_patch_size_seqs:
-                - 16
+            backbone_ground_cover: 2880
+            backbone_patch_sizes: 16
             backbone_out_indices: [-1]
             backbone_model_bands:
               # - COASTAL_AEROSOL

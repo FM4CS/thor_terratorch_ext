@@ -1,11 +1,13 @@
 from .iceberg_dataset import IcebergDataset
 from .mire_map_dataset import MireMapDataset
-from .utils import OLCIBands, SARThorBands, SLSTRBands
+from .utils import S2L2ABands, S3OLCIBands, S3SLSTRBands, SARThorBands, ThorModalities
 
 __all__ = [
+    "ThorModalities",
+    "S2L2ABands",
     "SARThorBands",
-    "OLCIBands",
-    "SLSTRBands",
+    "S3OLCIBands",
+    "S3SLSTRBands",
     "MireMapDataset",
     "IcebergDataset",
 ]
