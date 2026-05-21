@@ -3,10 +3,10 @@
 ## TerraTorch based dataset examples
 
 ### Sen1floods11 segmentation
-**[thor_segmentation_sen1floods.ipynb](thor_segmentation_sen1floods.ipynb)**
+**[thor_segmentation_sen1floods11.ipynb](thor_segmentation_sen1floods11.ipynb)**
 
 ### Embedding generation
-**[thor_embedding_generation.ipynb](thor_embedding_generation.ipynb)**
+**[thor_embedding_generation_sen1floods11.ipynb](thor_embedding_generation_sen1floods11.ipynb)**
 
 ## THOR data preprocessing and inference examples
 
