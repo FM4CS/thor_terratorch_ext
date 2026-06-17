@@ -37,8 +37,9 @@ tar -xvf sen1floods11_v1.1.tar.gz
 
 ## Embedding generation
 
-**[embedding_generation.yaml](embedding_generation.yaml)**: This config is for generating embeddings using a pre-trained THOR ViT backbone. The example config generates embeddings for the sen1floods11 dataset. See above for how to download the dataset. The config can be adapted for your own embedding generation experiments.
+**[embedding_generation_sen1floods11_S2.yaml](embedding_generation_sen1floods11_S2.yaml)**: This config is for generating embeddings using a pre-trained THOR ViT backbone. The example config generates embeddings for the sen1floods11 dataset (only Sentinel-2 data) . See above or one of the notebooks for how to download the dataset. The config can be adapted for your own embedding generation experiments.
 
+**[embedding_generation_burnscars.yaml](embedding_generation_burnscars.yaml)**: This config is for generating embeddings using a pre-trained THOR ViT backbone. The example config generates embeddings for the burnscars dataset. The config can be adapted for your own embedding generation experiments. See the notebook [thor_embedding_generation_burnscars.ipynb](../notebooks/thor_embedding_generation_burnscars.ipynb) for an example of how to run the embedding generation using this config.
 
 ## Unreleased datasets configs 
 The following configs are for datasets that are not yet publicly released, but will be released in the near future.
