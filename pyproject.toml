@@ -46,4 +46,6 @@ log = ["wandb>=0.19.11"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-
+markers = [
+    "network: tests that require network access (huggingface download)",
+]

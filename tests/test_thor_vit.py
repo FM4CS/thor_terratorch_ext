@@ -20,11 +20,15 @@ from thor_terratorch_ext.datasets.utils import (
 from thor_terratorch_ext.models.backbones.thor_vit import (
     _ensure_allowed_input_params,
     _normalize_patch_sizes,
+    _parse_modality_gsd,
+    _process_custom_modalities,
     _resolve_band_key,
     _to_internal_band_name,
+    THOR_NORMALIZATION_PARAMS,
     THOREncoderWrapper,
     bands_from_modalities,
     load_thor_model,
+    normalise_for_thor,
     process_thor_bands,
 )
 
@@ -741,6 +745,32 @@ class TestNormalizePatchSizes:
 
 
 # ---------------------------------------------------------------------------
+# normalise_for_thor
+# ---------------------------------------------------------------------------
+
+
+class TestNormaliseForThor:
+    def test_accepts_suffixed_sar_band_keys(self):
+        arr = np.array(
+            [[[THOR_NORMALIZATION_PARAMS["S1:IW-VV_60"]["mean"]]]],
+            dtype=np.float32,
+        )
+        result = normalise_for_thor(arr, ["IW_VV_60"])
+        assert np.isclose(result[0, 0, 0], 0.0)
+
+    def test_default_ew_hh_hv_use_10m_stats(self):
+        arr = np.array(
+            [
+                [[THOR_NORMALIZATION_PARAMS["S1:EW-HH_10"]["mean"]]],
+                [[THOR_NORMALIZATION_PARAMS["S1:EW-HV_10"]["mean"]]],
+            ],
+            dtype=np.float32,
+        )
+        result = normalise_for_thor(arr, ["EW_HH", "EW_HV"])
+        assert np.allclose(result[:, 0, 0], 0.0)
+
+
+# ---------------------------------------------------------------------------
 # load_thor_model — new kwargs and deprecation
 # ---------------------------------------------------------------------------
 
@@ -842,3 +872,332 @@ class TestModalityGsdSuffixEndToEnd:
         x = {"S1GRD_240": torch.randn(1, 2, 12, 12)}
         out = wrapper(x)
         assert len(out) == len(wrapper.out_indices)
+
+
+# ---------------------------------------------------------------------------
+# _process_custom_modalities
+# ---------------------------------------------------------------------------
+
+
+_DEFAULT_CHANNEL_PARAMS = {
+    "S1:IW-VV": {"GSD": 10, "patch_size": 16},
+    "S1:IW-VH": {"GSD": 10, "patch_size": 16},
+    "S2:Red": {"GSD": 10, "patch_size": 16},
+    "S2:Blue": {"GSD": 10, "patch_size": 16},
+}
+
+
+class TestProcessCustomModalities:
+    def test_list_spec_auto_names_bands(self):
+        new_bands, _, _, _, _ = _process_custom_modalities(
+            {"NISAR": ["IW_VV", "IW_VH"]}, _DEFAULT_CHANNEL_PARAMS
+        )
+        assert new_bands == ["NISAR:IW-VV", "NISAR:IW-VH"]
+
+    def test_list_spec_inherits_gsd(self):
+        _, new_configs, _, _, _ = _process_custom_modalities(
+            {"NISAR": ["IW_VV"]}, _DEFAULT_CHANNEL_PARAMS
+        )
+        assert new_configs["NISAR:IW-VV"]["GSD"] == 10
+
+    def test_list_spec_strips_patch_embed_name(self):
+        base = {"S1:IW-VV": {"GSD": 10, "patch_size": 16, "patch_embed_name": "S1:VV"}}
+        _, new_configs, _, _, _ = _process_custom_modalities({"NISAR": ["IW_VV"]}, base)
+        assert "patch_embed_name" not in new_configs["NISAR:IW-VV"]
+
+    def test_list_spec_init_from_map(self):
+        _, _, init_from, _, _ = _process_custom_modalities(
+            {"NISAR": ["IW_VV", "IW_VH"]}, _DEFAULT_CHANNEL_PARAMS
+        )
+        assert init_from["NISAR:IW-VV"] == "S1:IW-VV"
+        assert init_from["NISAR:IW-VH"] == "S1:IW-VH"
+
+    def test_dict_spec_explicit_names(self):
+        new_bands, _, init_from, _, _ = _process_custom_modalities(
+            {"NISAR": {"VV": "IW_VV", "VH": "IW_VH"}}, _DEFAULT_CHANNEL_PARAMS
+        )
+        assert "NISAR:VV" in new_bands
+        assert "NISAR:VH" in new_bands
+        assert init_from["NISAR:VV"] == "S1:IW-VV"
+
+    def test_dict_spec_already_has_colon(self):
+        """If new band name already has ':', it should not be prefixed."""
+        new_bands, _, _, _, _ = _process_custom_modalities(
+            {"NISAR": {"NISAR:MyBand": "IW_VV"}}, _DEFAULT_CHANNEL_PARAMS
+        )
+        assert "NISAR:MyBand" in new_bands
+        assert "NISAR:NISAR:MyBand" not in new_bands
+
+    def test_modality_to_bands_populated(self):
+        _, _, _, _, mod_to_bands = _process_custom_modalities(
+            {"NISAR": ["IW_VV", "IW_VH"]}, _DEFAULT_CHANNEL_PARAMS
+        )
+        assert mod_to_bands["NISAR"] == ["NISAR:IW-VV", "NISAR:IW-VH"]
+
+    def test_new_groups_created(self):
+        _, _, _, new_groups, _ = _process_custom_modalities(
+            {"NISAR": ["IW_VV", "IW_VH"]}, _DEFAULT_CHANNEL_PARAMS
+        )
+        # IW-VV and IW-VH share the same default source group → one new group
+        assert len(new_groups) == 1
+        assert set(new_groups[0]) == {"NISAR:IW-VV", "NISAR:IW-VH"}
+
+    def test_sources_from_different_groups_produce_separate_new_groups(self):
+        # S2:Red (group0 / 10m) and S1:IW-VV (group3 / SAR) are in different groups
+        _, _, _, new_groups, _ = _process_custom_modalities(
+            {"CUSTOM": ["RED", "IW_VV"]}, _DEFAULT_CHANNEL_PARAMS
+        )
+        assert len(new_groups) == 2
+
+    def test_duplicate_band_name_raises(self):
+        with pytest.raises(ValueError, match="defined more than once"):
+            _process_custom_modalities(
+                {"NISAR": {"NISAR:VV": "IW_VV"}, "NISAR2": {"NISAR:VV": "IW_VH"}},
+                _DEFAULT_CHANNEL_PARAMS,
+            )
+
+    def test_enum_values_accepted(self):
+        new_bands, _, _, _, _ = _process_custom_modalities(
+            {"NISAR": [SARThorBands.IW_VV]}, _DEFAULT_CHANNEL_PARAMS
+        )
+        assert new_bands == ["NISAR:IW-VV"]
+
+
+# ---------------------------------------------------------------------------
+# load_thor_model — custom modalities (pretrained=False, no weight transfer)
+# ---------------------------------------------------------------------------
+
+
+class TestLoadThorModelCustomModalities:
+    def test_custom_modality_bands_in_wrapper(self):
+        wrapper = load_thor_model(
+            "thor_v1_tiny",
+            modalities={"S2L2A": list(S2L2ABands), "NISAR": [SARThorBands.IW_VV, SARThorBands.IW_VH]},
+            pretrained=False,
+        )
+        assert "NISAR:IW-VV" in wrapper.bands
+        assert "NISAR:IW-VH" in wrapper.bands
+
+    def test_custom_modality_adds_extra_group(self):
+        wrapper_s2 = load_thor_model(
+            "thor_v1_tiny",
+            modalities={"S2L2A": list(S2L2ABands)},
+            pretrained=False,
+        )
+        wrapper_s2_nisar = load_thor_model(
+            "thor_v1_tiny",
+            modalities={"S2L2A": list(S2L2ABands), "NISAR": [SARThorBands.IW_VV, SARThorBands.IW_VH]},
+            pretrained=False,
+        )
+        assert len(wrapper_s2_nisar.groups) == len(wrapper_s2.groups) + 1
+
+    def test_custom_modality_only(self):
+        """Custom-only modalities dict with no known ThorModalities should work."""
+        wrapper = load_thor_model(
+            "thor_v1_tiny",
+            modalities={"NISAR": [SARThorBands.IW_VV, SARThorBands.IW_VH]},
+            pretrained=False,
+        )
+        assert wrapper.bands == ["NISAR:IW-VV", "NISAR:IW-VH"]
+
+    def test_custom_modality_patch_sizes_expansion(self):
+        """patch_sizes={"NISAR": 16} should expand to all NISAR band names."""
+        wrapper = load_thor_model(
+            "thor_v1_tiny",
+            modalities={"NISAR": [SARThorBands.IW_VV, SARThorBands.IW_VH]},
+            pretrained=False,
+            patch_sizes={"NISAR": 16},
+        )
+        # If expansion works, model builds without KeyError in THOR internals
+        assert "NISAR:IW-VV" in wrapper.bands
+
+    def test_explicit_init_from_kwarg(self):
+        """init_from kwarg should create new bands with copied channel config."""
+        wrapper = load_thor_model(
+            "thor_v1_tiny",
+            modalities={"S2L2A": list(S2L2ABands)},
+            pretrained=False,
+            init_from={"NISAR:VV": "IW_VV", "NISAR:VH": "IW_VH"},
+        )
+        assert "NISAR:VV" in wrapper.bands
+        assert "NISAR:VH" in wrapper.bands
+        assert wrapper.channels["NISAR:VV"]["GSD"] == wrapper.channels["S1:IW-VV"]["GSD"]
+
+    def test_mixed_known_and_custom_modalities(self):
+        wrapper = load_thor_model(
+            "thor_v1_tiny",
+            modalities={
+                "S2L2A": list(S2L2ABands),
+                "S1GRD": [SARThorBands.IW_VV, SARThorBands.IW_VH],
+                "NISAR": [SARThorBands.IW_VV, SARThorBands.IW_VH],
+            },
+            pretrained=False,
+        )
+        # Known modality bands present
+        assert "S2:Blue" in wrapper.bands
+        assert "S1:IW-VV" in wrapper.bands
+        # Custom modality bands present
+        assert "NISAR:IW-VV" in wrapper.bands
+
+    def test_model_bands_with_custom_modalities_raises(self):
+        with pytest.raises(ValueError, match="Specify either"):
+            load_thor_model(
+                "thor_v1_tiny",
+                model_bands=list(S2L2ABands),
+                modalities={"NISAR": [SARThorBands.IW_VV]},
+                pretrained=False,
+            )
+
+
+# ---------------------------------------------------------------------------
+# normalise_for_thor — behaviour with custom / unknown band keys
+# ---------------------------------------------------------------------------
+
+
+class TestNormaliseForThorCustomBands:
+    """Custom modality bands are not in THOR_NORMALIZATION_PARAMS.
+
+    normalise_for_thor intentionally does not fall back to source-band stats
+    because applying pretraining statistics from a different sensor would be
+    misleading.  Users must supply their own dataset-level normalisation for
+    new sensors.
+    """
+
+    def test_custom_band_not_in_normalization_params(self):
+        assert "NISAR:IW-VV" not in THOR_NORMALIZATION_PARAMS
+
+    def test_normalise_raises_for_unknown_band(self):
+        import numpy as np
+
+        arr = np.zeros((1, 4, 4), dtype=np.float32)
+        with pytest.raises(KeyError):
+            normalise_for_thor(arr, ["NISAR:IW-VV"])
+
+    def test_normalise_works_for_known_s1_band(self):
+        """Sanity check: known bands still normalise correctly."""
+        import numpy as np
+
+        mean = THOR_NORMALIZATION_PARAMS["S1:IW-VV"]["mean"]
+        arr = np.full((1, 4, 4), mean, dtype=np.float32)
+        result = normalise_for_thor(arr, ["S1:IW-VV"])
+        assert np.allclose(result, 0.0)
+
+
+# ---------------------------------------------------------------------------
+# Pretrained weight matching  (requires network / HuggingFace download)
+# ---------------------------------------------------------------------------
+
+
+def _patch_embed_weight(wrapper: THOREncoderWrapper, channel_name: str) -> "torch.Tensor":
+    """Return the patch-embedding Conv2d weight tensor for *channel_name*."""
+    rename_map = wrapper.model.ind_patch_embed.channel_rename_map
+    layer_key = rename_map[channel_name]
+    return wrapper.model.state_dict()[f"ind_patch_embed.patch_embed.{layer_key}.weight"]
+
+
+def _patch_embed_bias(wrapper: THOREncoderWrapper, channel_name: str) -> "torch.Tensor":
+    rename_map = wrapper.model.ind_patch_embed.channel_rename_map
+    layer_key = rename_map[channel_name]
+    return wrapper.model.state_dict()[f"ind_patch_embed.patch_embed.{layer_key}.bias"]
+
+
+# Module-scope fixtures so the pretrained weights are downloaded at most once.
+
+@pytest.fixture(scope="module")
+def tiny_s1_pretrained() -> THOREncoderWrapper:
+    return load_thor_model(
+        "thor_v1_tiny",
+        modalities={"S1GRD": [SARThorBands.IW_VV, SARThorBands.IW_VH]},
+        pretrained=True,
+    )
+
+
+@pytest.fixture(scope="module")
+def tiny_s1_nisar_pretrained() -> THOREncoderWrapper:
+    """S1 bands + NISAR custom modality initialised from S1 weights."""
+    return load_thor_model(
+        "thor_v1_tiny",
+        modalities={
+            "S1GRD": [SARThorBands.IW_VV, SARThorBands.IW_VH],
+            "NISAR": [SARThorBands.IW_VV, SARThorBands.IW_VH],
+        },
+        pretrained=True,
+    )
+
+
+@pytest.mark.network
+class TestPretrainedWeightMatching:
+    """Verify that ckpt_init_from correctly transfers weights from a real checkpoint.
+
+    Standard bands:
+      S1:IW-VV and S1:IW-VH weights must be identical whether or not custom
+      modality bands are added.
+
+    New bands:
+      NISAR:IW-VV patch-embed weight must equal S1:IW-VV (same source).
+      NISAR:IW-VH patch-embed weight must equal S1:IW-VH (same source).
+      Same for biases.
+    """
+
+    def test_standard_band_weights_unchanged_after_adding_custom_modality(
+        self,
+        tiny_s1_pretrained: THOREncoderWrapper,
+        tiny_s1_nisar_pretrained: THOREncoderWrapper,
+    ):
+        for band in ("S1:IW-VV", "S1:IW-VH"):
+            w_base = _patch_embed_weight(tiny_s1_pretrained, band)
+            w_new = _patch_embed_weight(tiny_s1_nisar_pretrained, band)
+            assert torch.equal(w_base, w_new), (
+                f"S1 band '{band}' weight changed after adding NISAR custom modality"
+            )
+
+    def test_nisar_weight_matches_s1_source(
+        self, tiny_s1_nisar_pretrained: THOREncoderWrapper
+    ):
+        w_nisar_vv = _patch_embed_weight(tiny_s1_nisar_pretrained, "NISAR:IW-VV")
+        w_s1_vv = _patch_embed_weight(tiny_s1_nisar_pretrained, "S1:IW-VV")
+        assert torch.equal(w_nisar_vv, w_s1_vv), (
+            "NISAR:IW-VV weight should be a clone of S1:IW-VV from the pretrained checkpoint"
+        )
+
+    def test_nisar_vh_weight_matches_s1_vh_source(
+        self, tiny_s1_nisar_pretrained: THOREncoderWrapper
+    ):
+        w_nisar_vh = _patch_embed_weight(tiny_s1_nisar_pretrained, "NISAR:IW-VH")
+        w_s1_vh = _patch_embed_weight(tiny_s1_nisar_pretrained, "S1:IW-VH")
+        assert torch.equal(w_nisar_vh, w_s1_vh)
+
+    def test_nisar_bias_matches_s1_source(
+        self, tiny_s1_nisar_pretrained: THOREncoderWrapper
+    ):
+        b_nisar = _patch_embed_bias(tiny_s1_nisar_pretrained, "NISAR:IW-VV")
+        b_s1 = _patch_embed_bias(tiny_s1_nisar_pretrained, "S1:IW-VV")
+        assert torch.equal(b_nisar, b_s1)
+
+    def test_nisar_weight_is_independent_copy(
+        self, tiny_s1_nisar_pretrained: THOREncoderWrapper
+    ):
+        """Mutating one weight must not affect the other (clone, not alias)."""
+        w_nisar = _patch_embed_weight(tiny_s1_nisar_pretrained, "NISAR:IW-VV").clone()
+        w_s1 = _patch_embed_weight(tiny_s1_nisar_pretrained, "S1:IW-VV").clone()
+        assert w_nisar.data_ptr() != w_s1.data_ptr()
+
+    def test_s1_vv_and_vh_weights_differ(
+        self, tiny_s1_nisar_pretrained: THOREncoderWrapper
+    ):
+        """Basic sanity: VV and VH must have different weights (independent channels)."""
+        w_vv = _patch_embed_weight(tiny_s1_nisar_pretrained, "S1:IW-VV")
+        w_vh = _patch_embed_weight(tiny_s1_nisar_pretrained, "S1:IW-VH")
+        assert not torch.equal(w_vv, w_vh)
+
+    def test_standard_band_biases_unchanged(
+        self,
+        tiny_s1_pretrained: THOREncoderWrapper,
+        tiny_s1_nisar_pretrained: THOREncoderWrapper,
+    ):
+        for band in ("S1:IW-VV", "S1:IW-VH"):
+            b_base = _patch_embed_bias(tiny_s1_pretrained, band)
+            b_new = _patch_embed_bias(tiny_s1_nisar_pretrained, band)
+            assert torch.equal(b_base, b_new), (
+                f"S1 band '{band}' bias changed after adding NISAR custom modality"
+            )

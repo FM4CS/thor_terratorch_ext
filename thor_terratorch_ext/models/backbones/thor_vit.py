@@ -426,7 +426,15 @@ def _normalize_patch_sizes(
         expanded: dict[str, list[int]] = {}
         for key, value in patch_sizes.items():
             sizes = [value] if isinstance(value, int) else list(value)
-            for internal_name in _resolve_band_key(key):
+            try:
+                internal_names = _resolve_band_key(key)
+            except ValueError:
+                # Custom/new bands have the "Product:Band" form; pass through as-is.
+                if ":" in key:
+                    internal_names = [key]
+                else:
+                    raise
+            for internal_name in internal_names:
                 if internal_name in expanded:
                     logger.warning(
                         f"patch_sizes: key '{key}' resolved to '{internal_name}' "
@@ -497,7 +505,9 @@ def normalise_for_thor(
     band_keys_normalized: list[str] = [
         k.value if not isinstance(k, str) else k for k in band_keys
     ]
-    band_keys_normalized = [lookup_band.get(k, k) for k in band_keys_normalized]
+    band_keys_normalized = [
+        _normalize_band_key_for_stats(k) for k in band_keys_normalized
+    ]
 
     out = arr.copy()
     for i, key in enumerate(band_keys_normalized):
@@ -505,6 +515,21 @@ def normalise_for_thor(
         s = THOR_NORMALIZATION_PARAMS[key]["std"]
         out[i] = (np.nan_to_num(arr[i], nan=m) - m) / s
     return out
+
+
+def _normalize_band_key_for_stats(band_key: str) -> str:
+    if band_key in THOR_NORMALIZATION_PARAMS:
+        return band_key
+
+    if (
+        "_" in band_key
+        and band_key.rsplit("_", 1)[-1].isdigit()
+        and any(pol in band_key for pol in ("VV", "VH", "HH", "HV"))
+    ):
+        base_band, gsd_str = band_key.rsplit("_", 1)
+        return f"{_to_internal_band_name(base_band)}_{gsd_str}"
+
+    return lookup_band.get(band_key, band_key)
 
 
 def process_thor_bands(
@@ -718,7 +743,7 @@ class THOREncoderWrapper(nn.Module):
             grouped = []
             grouped_tokens = {}
             # Important that we iterate through this in the same order we encoded.
-            for group_members in self.groups.values():
+            for group_name, group_members in self.groups.items():
                 member = next((m for m in group_members if m in channel_params), None)
                 if member is None:
                     msg = f"None of the group members {group_members} found in channel_params"
@@ -731,7 +756,7 @@ class THOREncoderWrapper(nn.Module):
                 )  # B, num_patch, num_patch, C
                 x_ = x_.permute(0, 3, 1, 2)  # B, C, H, W
                 if self.merge_method == "group":
-                    grouped_tokens[member] = x_
+                    grouped_tokens[group_name] = x_
                 else:
                     if num_patch != highest_num_patch:
                         x_ = F.interpolate(
@@ -863,7 +888,9 @@ def bands_from_modalities(
             available = set(available_bands)
             by_value = {band.value: band for band in available_bands}
             for band in subset:
-                normalized_band = by_value.get(band, band) if isinstance(band, str) else band
+                normalized_band = (
+                    by_value.get(band, band) if isinstance(band, str) else band
+                )
                 if normalized_band not in available:
                     raise ValueError(
                         f"Band '{band}' is not part of modality '{modality.value}'. Available: {list(available)}."
@@ -873,6 +900,111 @@ def bands_from_modalities(
                     seen.add(normalized_band)
 
     return bands
+
+
+def _process_custom_modalities(
+    custom_modalities: dict[str, list | dict],
+    base_channel_params: dict[str, dict],
+) -> tuple[list[str], dict[str, dict], dict[str, str], list[list[str]], dict[str, list[str]]]:
+    """Process custom (non-ThorModalities) entries from the modalities dict.
+
+    Each key in *custom_modalities* is an arbitrary modality name (e.g. ``"NISAR"``).
+    The value may be:
+
+    * ``list`` of existing band names/enums — new bands are auto-named
+      ``"MODALITY:SourceSuffix"`` (e.g. ``"NISAR:IW-VV"``) and mapped
+      positionally to the source bands.
+    * ``dict[str, str]`` — explicit ``{new_band_name: source_band_name}``
+      mapping.  If a new band name lacks a ``":"`` separator it is
+      prefixed with the modality name.
+
+    New bands inherit the source band's GSD and patch_size channel config.
+    They are grouped by which default source group their source band belongs
+    to, so that bands whose sources share a group are co-grouped.
+
+    Returns
+    -------
+    new_bands:
+        Ordered list of new internal band names.
+    new_channel_configs:
+        ``{band_name: {GSD, patch_size, …}}`` for each new band.
+    init_from_map:
+        ``{new_band_name: source_internal_band_name}`` passed to
+        ``ckpt_init_from`` in the model registry.
+    new_groups:
+        List of groups (list-of-band-name lists) to append to
+        ``input_params["groups"]``.
+    modality_to_bands:
+        ``{modality_name: [new_band_names]}`` used to expand per-modality
+        keys in ``patch_sizes``.
+    """
+    source_to_group: dict[str, str] = {}
+    for group_name, members in _DEFAULT_GROUPS.items():
+        for member in members:
+            source_to_group[member] = group_name
+
+    all_new_bands: list[str] = []
+    new_channel_configs: dict[str, dict] = {}
+    init_from_map: dict[str, str] = {}
+    modality_to_bands: dict[str, list[str]] = {}
+    src_group_to_new_bands: dict[str, list[str]] = {}
+
+    for modality_name, band_spec in custom_modalities.items():
+        if isinstance(band_spec, dict):
+            mapping: dict[str, str] = {}
+            for new_name, src_name_raw in band_spec.items():
+                src_str = src_name_raw.value if not isinstance(src_name_raw, str) else src_name_raw
+                src_internal = _to_internal_band_name(src_str)
+                if ":" not in new_name:
+                    new_name = f"{modality_name}:{new_name}"
+                mapping[new_name] = src_internal
+        else:
+            mapping = {}
+            seen_suffixes: dict[str, int] = {}
+            for src_band in band_spec:
+                src_str = src_band.value if not isinstance(src_band, str) else src_band
+                src_internal = _to_internal_band_name(src_str)
+                suffix = src_internal.split(":", 1)[-1] if ":" in src_internal else src_internal
+                count = seen_suffixes.get(suffix, 0)
+                seen_suffixes[suffix] = count + 1
+                unique_suffix = f"{suffix}_{count}" if count > 0 else suffix
+                mapping[f"{modality_name}:{unique_suffix}"] = src_internal
+
+        logger.info(
+            f"Custom modality '{modality_name}': creating {len(mapping)} new band(s) "
+            f"initialised from existing checkpoint weights"
+        )
+        modality_band_list: list[str] = []
+        for new_name, src_internal in mapping.items():
+            if new_name in new_channel_configs:
+                raise ValueError(f"Custom modality band '{new_name}' is defined more than once.")
+            src_config = {
+                k: v
+                for k, v in base_channel_params.get(src_internal, {}).items()
+                if k not in ("patch_embed_name", "num_patch")
+            }
+            new_channel_configs[new_name] = src_config
+            init_from_map[new_name] = src_internal
+            all_new_bands.append(new_name)
+            modality_band_list.append(new_name)
+
+            # Cluster new bands by their source group so co-grouped sources
+            # produce co-grouped new bands.
+            src_group = source_to_group.get(src_internal, f"ungrouped_{modality_name}")
+            group_key = f"{modality_name}__{src_group}"
+            src_group_to_new_bands.setdefault(group_key, []).append(new_name)
+
+            gsd = src_config.get("GSD", "?")
+            ps = src_config.get("patch_size", "?")
+            logger.info(
+                f"  new band '{new_name}' ← '{src_internal}' "
+                f"(GSD={gsd}, patch_size={ps}, source_group={src_group})"
+            )
+
+        modality_to_bands[modality_name] = modality_band_list
+
+    new_groups = list(src_group_to_new_bands.values())
+    return all_new_bands, new_channel_configs, init_from_map, new_groups, modality_to_bands
 
 
 def load_thor_model(
@@ -896,13 +1028,38 @@ def load_thor_model(
         )
         logger.debug(f"Mapped model name to full THOR model name: {model_name}")
 
-    if model_bands is not None and modalities is not None:
+    # Pop band-init kwargs early — must be applied during band processing
+    init_from = kwargs.pop("init_from", None)
+    clone_prod_embed = kwargs.pop("clone_prod_embed", False)
+
+    # Split known ThorModalities from custom (unknown) modality keys.
+    # Custom modalities are new sensors whose patch embeddings will be
+    # initialised from existing checkpoint weights via ckpt_init_from.
+    custom_modalities: dict = {}
+    modality_to_bands: dict[str, list[str]] = {}
+    if modalities is not None and isinstance(modalities, dict):
+        known_modalities_dict: dict = {}
+        for key, val in modalities.items():
+            base_key = _parse_modality_gsd(key if isinstance(key, str) else key.value)[0]
+            try:
+                ThorModalities(base_key)
+                known_modalities_dict[key] = val
+            except ValueError:
+                custom_modalities[key] = val
+        _modalities = known_modalities_dict if known_modalities_dict else None
+    else:
+        _modalities = modalities
+
+    if model_bands is not None and (_modalities is not None or custom_modalities):
         raise ValueError("Specify either 'model_bands' or 'modalities', not both.")
 
-    if modalities is not None:
-        logger.info(f"Deriving model bands from modalities: {modalities}")
-        modality_bands = bands_from_modalities(modalities)
+    if _modalities is not None:
+        logger.info(f"Deriving model bands from modalities: {_modalities}")
+        modality_bands = bands_from_modalities(_modalities)
         bands, channel_params_updated = process_thor_bands(modality_bands)
+    elif custom_modalities and model_bands is None:
+        bands = []
+        channel_params_updated = deepcopy(_default_input_params["channels"])
     else:
         if model_bands is None:
             logger.info(
@@ -926,6 +1083,62 @@ def load_thor_model(
             ]
         # Map to THOR band names and get updated channel params if necessary
         bands, channel_params_updated = process_thor_bands(model_bands)
+
+    # Process custom modalities: derive new band names, channel configs,
+    # init_from mapping, and new groups to register with the model.
+    custom_new_groups: list[list[str]] = []
+    custom_init_from: dict[str, str] = {}
+    if custom_modalities:
+        (
+            custom_new_bands,
+            custom_new_channel_configs,
+            custom_init_from,
+            custom_new_groups,
+            modality_to_bands,
+        ) = _process_custom_modalities(custom_modalities, channel_params_updated)
+        bands.extend(custom_new_bands)
+        channel_params_updated.update(custom_new_channel_configs)
+        logger.info(
+            f"Registered {len(custom_new_bands)} new custom-modality band(s) across "
+            f"{len(custom_new_groups)} new group(s): {custom_new_bands}"
+        )
+
+    # Merge explicit init_from kwarg (lower-level API, band-name keyed)
+    if init_from:
+        logger.info(
+            f"init_from kwarg: adding {len(init_from)} new band(s) "
+            f"initialised from existing checkpoint weights"
+        )
+        _source_to_group: dict[str, str] = {
+            member: gname
+            for gname, members in _DEFAULT_GROUPS.items()
+            for member in members
+        }
+        _init_from_group_map: dict[str, list[str]] = {}
+        for new_name, src_name_raw in init_from.items():
+            src_str = src_name_raw if isinstance(src_name_raw, str) else src_name_raw.value
+            src_internal = _to_internal_band_name(src_str)
+            custom_init_from[new_name] = src_internal
+            if new_name not in channel_params_updated:
+                src_config = {
+                    k: v
+                    for k, v in channel_params_updated.get(src_internal, {}).items()
+                    if k not in ("patch_embed_name", "num_patch")
+                }
+                channel_params_updated[new_name] = src_config
+            if new_name not in bands:
+                bands.append(new_name)
+            # Cluster by source group so the model registers these bands in a group
+            src_group = _source_to_group.get(src_internal, f"ungrouped_{new_name.split(':')[0]}")
+            _init_from_group_map.setdefault(src_group, []).append(new_name)
+            gsd = channel_params_updated.get(new_name, {}).get("GSD", "?")
+            ps = channel_params_updated.get(new_name, {}).get("patch_size", "?")
+            logger.info(
+                f"  new band '{new_name}' ← '{src_internal}' "
+                f"(GSD={gsd}, patch_size={ps}, source_group={src_group})"
+            )
+        custom_new_groups.extend(_init_from_group_map.values())
+
     logger.debug(f"bands mapped to thor: {bands}")
 
     config = kwargs.pop("config", None)
@@ -956,8 +1169,22 @@ def load_thor_model(
     return_channel_params = kwargs.pop("return_channel_params", False)
     merge_method = kwargs.pop("merge_method", None)
 
+    # Expand custom modality name keys in patch_sizes to individual band names.
+    # E.g. patch_sizes={"NISAR": [32]} → {"NISAR:IW-VV": [32], "NISAR:IW-VH": [32], …}
+    if patch_sizes is not None and isinstance(patch_sizes, dict) and modality_to_bands:
+        expanded_patch_sizes: dict = {}
+        for key, val in patch_sizes.items():
+            if key in modality_to_bands:
+                for band_name in modality_to_bands[key]:
+                    expanded_patch_sizes[band_name] = val
+            else:
+                expanded_patch_sizes[key] = val
+        patch_sizes = expanded_patch_sizes
+
     default_input_params = deepcopy(_default_input_params)
     default_input_params["channels"].update(channel_params_updated)
+    if custom_new_groups:
+        default_input_params["groups"].extend(custom_new_groups)
     model_config = {
         "type": model_name,
         "strict": False,  # Whether to strictly enforce that the keys in state_dict match the keys returned by the model's state_dict function.
@@ -970,6 +1197,17 @@ def load_thor_model(
         ],  # regex ignore list, removing mae head
         "input_params": default_input_params,
     }
+    if custom_init_from:
+        model_config["ckpt_init_from"] = {
+            "channels": custom_init_from,
+            "clone_prod_embed": clone_prod_embed,
+        }
+        logger.info(
+            f"ckpt_init_from: will initialise {len(custom_init_from)} new patch "
+            f"embedding(s) from checkpoint weights "
+            f"(clone_prod_embed={clone_prod_embed}): "
+            + ", ".join(f"'{n}' ← '{s}'" for n, s in custom_init_from.items())
+        )
     model_checkpoint_key = kwargs.pop("model_ckpt_type", "encoder")
 
     if config is not None:
