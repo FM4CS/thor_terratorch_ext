@@ -2,6 +2,7 @@ import logging
 import warnings
 from copy import deepcopy
 from functools import partial
+from math import lcm as _math_lcm
 from pathlib import Path
 from typing import Any, Literal
 from collections.abc import Iterable, Sequence
@@ -163,6 +164,19 @@ _user_overridable_params = {
 
 _DEFAULT_GROUPS: dict[str, list[str]] = {
     f"group{i}": group for i, group in enumerate(_default_input_params["groups"])
+}
+
+_deprecated_keyword_lookup = {
+    "patch_size": "flexivit_patch_size_seqs",
+    "ref_patch_size": "flexivit_ref_patch_size",
+    "ground_cover": "ground_covers",
+}
+
+_user_overridable_args = {
+    "ground_cover",
+    "patch_size",
+    "ref_patch_size",
+    "select_patch_strategy",
 }
 
 
@@ -586,7 +600,7 @@ def process_thor_bands(
 class THOREncoderWrapper(nn.Module):
     def __init__(
         self,
-        model: Any,
+        model: nn.Module,
         bands: list[str] | None = None,
         out_indices: list[int] | None = None,
         return_channel_params: bool = False,
@@ -863,7 +877,9 @@ def bands_from_modalities(
             available = set(available_bands)
             by_value = {band.value: band for band in available_bands}
             for band in subset:
-                normalized_band = by_value.get(band, band) if isinstance(band, str) else band
+                normalized_band = (
+                    by_value.get(band, band) if isinstance(band, str) else band
+                )
                 if normalized_band not in available:
                     raise ValueError(
                         f"Band '{band}' is not part of modality '{modality.value}'. Available: {list(available)}."
@@ -873,6 +889,216 @@ def bands_from_modalities(
                     seen.add(normalized_band)
 
     return bands
+
+
+def _resolve_patch_size_per_group(
+    ground_cover: int,
+    flexivit_patch_size_seqs: list[int],
+    active_groups: list[list[str]],
+    channels: dict[str, dict],
+    select_patch_strategy: str,
+) -> list[int | None]:
+    """Return the patch size selected for each active group, or ``None`` if no candidate works.
+
+    For ``"min"`` / ``"max"`` strategies, candidates are tried in ascending / descending order
+    and the first one where ``(ground_cover // GSD) % candidate == 0`` is chosen.  ``None`` is
+    returned for a group when no candidate in the sequence divides its pixel count exactly.
+
+    For ``"equal-min"`` / ``"equal-max"`` strategies, the coarsest-GSD group is assigned each
+    reference patch size in turn (ascending / descending) and the other groups are scaled to
+    maintain equal patches per side (``patch_size ∝ 1/GSD``).  The first reference value for
+    which *all* groups yield an integer scaled patch size that also divides their pixel count is
+    used.  ``None`` is returned for every group if no reference value succeeds.
+
+    A single-element sequence is special-cased: that one value is used for all groups
+    unconditionally — strategy is irrelevant when there is only one candidate.
+    """
+    n_groups = len(active_groups)
+
+    if len(flexivit_patch_size_seqs) == 1:
+        ps = flexivit_patch_size_seqs[0]
+        result: list[int | None] = []
+        for group_members in active_groups:
+            member = next((m for m in group_members if m in channels), None)
+            if member is None:
+                result.append(ps)
+                continue
+            gsd = channels[member]["GSD"]
+            result.append(ps if (ground_cover // gsd) % ps == 0 else None)
+        return result
+
+    if select_patch_strategy in ("min", "max"):
+        ordered = sorted(
+            flexivit_patch_size_seqs, reverse=(select_patch_strategy == "max")
+        )
+        result: list[int | None] = []
+        for group_members in active_groups:
+            member = next((m for m in group_members if m in channels), None)
+            if member is None:
+                result.append(ordered[0])
+                continue
+            gsd = channels[member]["GSD"]
+            px_per_side = ground_cover // gsd
+            result.append(next((ps for ps in ordered if px_per_side % ps == 0), None))
+        return result
+
+    if select_patch_strategy in ("equal-min", "equal-max"):
+        gsds: list[int | None] = [
+            channels[next(m for m in gm if m in channels)]["GSD"]
+            if any(m in channels for m in gm)
+            else None
+            for gm in active_groups
+        ]
+        valid_gsds = [g for g in gsds if g is not None]
+        if not valid_gsds:
+            return [min(flexivit_patch_size_seqs)] * n_groups
+
+        # Coarsest group gets the reference; finer groups scale up (patch_size ∝ 1/GSD).
+        max_gsd = max(valid_gsds)
+        ordered = sorted(
+            flexivit_patch_size_seqs, reverse=(select_patch_strategy == "equal-max")
+        )
+
+        for ref_ps in ordered:
+            scaled: dict[int, int] = {}
+            ok = True
+            for i, gsd in enumerate(gsds):
+                if gsd is None:
+                    scaled[i] = ref_ps
+                    continue
+                s = ref_ps * max_gsd / gsd
+                if s != int(s) or (ground_cover // gsd) % int(s) != 0:
+                    ok = False
+                    break
+                scaled[i] = int(s)
+            if ok:
+                return [scaled.get(i, ref_ps) for i in range(n_groups)]
+
+        return [None] * n_groups  # no valid configuration found
+
+    # Unknown strategy — try ascending order as a conservative fallback
+    logger.warning(
+        "Unknown select_patch_strategy=%r; trying candidates in ascending order for validation.",
+        select_patch_strategy,
+    )
+    ordered_fb = sorted(flexivit_patch_size_seqs)
+    result_fb: list[int | None] = []
+    for gm in active_groups:
+        member = next((m for m in gm if m in channels), None)
+        if member is None:
+            result_fb.append(ordered_fb[0])
+            continue
+        gsd = channels[member]["GSD"]
+        px = ground_cover // gsd
+        result_fb.append(next((ps for ps in ordered_fb if px % ps == 0), None))
+    return result_fb
+
+
+def _validate_ground_cover_and_patch_sizes(
+    ground_covers: list[int],
+    flexivit_patch_size_seqs: list[int],
+    bands: list[str],
+    channels: dict[str, dict],
+    select_patch_strategy: str = "min",
+) -> None:
+    """Validate that a valid patch size can be resolved for every active sensor group.
+
+    The THOR model asserts ``patch_size * GSD * num_patches == ground_cover`` per group during
+    the forward pass.  If no candidate in ``flexivit_patch_size_seqs`` satisfies this for a
+    group the model will raise an opaque ``AssertionError``.  This helper surfaces the problem
+    at model-construction time with a clear message and actionable suggestions.
+
+    For ``"min"`` / ``"max"`` strategies, each group independently picks the first (smallest /
+    largest) candidate that divides its pixel count, so a single bad candidate does not fail
+    the whole group — the next candidate is tried automatically.  An error is only raised when
+    *no* candidate in the sequence works for a group.
+
+    The ground_cover suggestion is computed from the **LCM** of all resolved ``GSD × patch_size``
+    values, so the suggested value fixes every failing group simultaneously.  A per-group
+    patch_size list (≥ 4) is also shown for cases where only one group needs adjustment.
+
+    Args:
+        ground_covers: Ground-cover values (metres) from ``input_params``.
+        flexivit_patch_size_seqs: Candidate patch sizes (``flexivit_patch_size_seqs``).
+        bands: THOR-mapped band names that will be fed to the model.
+        channels: Channel-parameter dict after GSD overrides, with a ``"GSD"`` key per band.
+        select_patch_strategy: Patch-size selection strategy (``"min"``, ``"max"``,
+            ``"equal-min"``, or ``"equal-max"``).
+
+    Raises:
+        ValueError: If no candidate patch size from the sequence can be resolved for any
+            active sensor group.
+    """
+    active_groups: list[list[str]] = [
+        group
+        for group in _default_input_params["groups"]
+        if any(b in group for b in bands)
+    ]
+
+    errors: list[str] = []
+    for ground_cover in ground_covers:
+        patch_sizes = _resolve_patch_size_per_group(
+            ground_cover,
+            flexivit_patch_size_seqs,
+            active_groups,
+            channels,
+            select_patch_strategy,
+        )
+
+        # LCM divisor for the global ground_cover suggestion.
+        # For groups that have no valid candidate (None), proxy with the smallest candidate ≥ 4
+        # so the suggestion at least fixes the valid groups and gets close for the failing ones.
+        min_viable = min(
+            (ps for ps in flexivit_patch_size_seqs if ps >= 4),
+            default=min(flexivit_patch_size_seqs),
+        )
+        group_divisors = [
+            channels[next(m for m in gm if m in channels)]["GSD"]
+            * (ps if ps is not None else min_viable)
+            for gm, ps in zip(active_groups, patch_sizes)
+            if any(m in channels for m in gm)
+        ]
+        global_divisor = _math_lcm(*group_divisors) if group_divisors else 1
+        floor_gc = (ground_cover // global_divisor) * global_divisor
+        ceil_gc = floor_gc + global_divisor
+        # Never suggest the current (failing) value
+        valid_gcs_all = [
+            gc for gc in [floor_gc, ceil_gc] if gc > 0 and gc != ground_cover
+        ]
+        if not valid_gcs_all:
+            valid_gcs_all = [ceil_gc]
+
+        for group_members, patch_size in zip(active_groups, patch_sizes):
+            if patch_size is not None:
+                continue  # a valid candidate was found — no error for this group
+            member = next((m for m in group_members if m in channels), None)
+            if member is None:
+                continue
+            gsd = channels[member]["GSD"]
+            px_per_side = ground_cover // gsd
+            valid_ps_this = [p for p in range(4, 33) if px_per_side % p == 0]
+            active_bands = [m for m in group_members if m in channels]
+            ordered_display = sorted(
+                flexivit_patch_size_seqs, reverse=(select_patch_strategy == "max")
+            )
+            errors.append(
+                f"  group {active_bands}: "
+                f"ground_cover={ground_cover} m / GSD={gsd} m = {px_per_side} px/side — "
+                f"no candidate in {ordered_display} divides {px_per_side} "
+                f"(strategy='{select_patch_strategy}').\n"
+                f"    Fix options:\n"
+                f"      • Adjust ground_cover to one of {valid_gcs_all} m "
+                f"(satisfies all active groups simultaneously)\n"
+                f"      • Use a patch_size ≥ 4 from {valid_ps_this} for this group only "
+                f"(may require adjusting other groups or the strategy)"
+            )
+
+    if errors:
+        raise ValueError(
+            "Incompatible ground_cover / flexivit_patch_size_seqs — "
+            "no valid patch_size from the sequence can be resolved for one or more active groups:\n"
+            + "\n".join(errors)
+        )
 
 
 def load_thor_model(
@@ -887,6 +1113,13 @@ def load_thor_model(
     | None = None,
     out_indices: list[int] | None = None,
     pretrained: bool = True,
+    merge_method: Literal["concat", "sum", "mean"] | None = None,
+    patch_size: int | list[int] | dict[str, int] | None = None,
+    ground_cover: int | None = None,
+    ref_patch_size: int | None = None,
+    select_patch_strategy: Literal["min", "max", "equal-min", "equal-max"]
+    | None = None,
+    return_channel_params: bool = False,
     **kwargs,
 ):
     # If short name provided, map to full model name
@@ -943,7 +1176,9 @@ def load_thor_model(
     select_patch_strategy = kwargs.pop("select_patch_strategy", None)
 
     # ---- deprecated input_params dict ----------------------------------------
-    input_params = kwargs.pop("input_params", {})
+    input_params = kwargs.pop(
+        "input_params", {}
+    )  # dict with input params to override config if provided
     if input_params:
         warnings.warn(
             "Passing 'input_params' is deprecated. Use the top-level kwargs "
@@ -952,9 +1187,33 @@ def load_thor_model(
             DeprecationWarning,
             stacklevel=2,
         )
+        # Add deprecation warning
+        for new_keyword, deprecated_keyword in _deprecated_keyword_lookup.items():
+            if deprecated_keyword in input_params:
+                warnings.warn(
+                    f"Passing {deprecated_keyword} in input_params is deprecated, "
+                    f"please pass {new_keyword} as a direct argument instead.",
+                    stacklevel=2,
+                )
 
-    return_channel_params = kwargs.pop("return_channel_params", False)
-    merge_method = kwargs.pop("merge_method", None)
+    for overridable_arg in _user_overridable_args:
+        if overridable_arg in kwargs:
+            v = kwargs.pop(overridable_arg)
+        elif overridable_arg in locals():
+            v = locals()[overridable_arg]
+        else:
+            continue
+        internal_fm4cs_keyword = _deprecated_keyword_lookup.get(overridable_arg, None)
+        if v is not None:
+            assert input_params.get(internal_fm4cs_keyword, None) is None, (
+                f"{overridable_arg} specified both as a direct argument and in input_params with key {internal_fm4cs_keyword}, please remove it from input_params."
+            )
+            if overridable_arg in ("ground_cover", "patch_size"):
+                if isinstance(v, int):
+                    v = [v]
+                input_params[internal_fm4cs_keyword] = v
+            else:
+                input_params[internal_fm4cs_keyword] = v
 
     default_input_params = deepcopy(_default_input_params)
     default_input_params["channels"].update(channel_params_updated)
@@ -972,6 +1231,10 @@ def load_thor_model(
     }
     model_checkpoint_key = kwargs.pop("model_ckpt_type", "encoder")
 
+    config = kwargs.pop("config", None)
+    if isinstance(config, str | Path):
+        logger.info(f"Loading backbone config from {config}")
+        config = yaml.safe_load(open(config))
     if config is not None:
         if "models" in config:
             config = config["models"]
@@ -1027,6 +1290,16 @@ def load_thor_model(
         model_config["input_params"]["flexivit_ref_patch_size"] = ref_patch_size
     if select_patch_strategy is not None:
         model_config["input_params"]["select_patch_strategy"] = select_patch_strategy
+
+    _validate_ground_cover_and_patch_sizes(
+        ground_covers=model_config["input_params"]["ground_covers"],
+        flexivit_patch_size_seqs=model_config["input_params"][
+            "flexivit_patch_size_seqs"
+        ],
+        bands=bands,
+        channels=model_config["input_params"]["channels"],
+        select_patch_strategy=model_config["input_params"]["select_patch_strategy"],
+    )
 
     if pretrained and model_config["ckpt"] is None:
         logger.info(f"Using pretrained weights for model {model_checkpoint_key}")
